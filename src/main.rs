@@ -381,7 +381,7 @@ fn main() {
         .add_systems(OnEnter(AppState::LoadingWorld), setup_loading_screen)
         .add_systems(OnExit(AppState::LoadingWorld), cleanup_menu)
         .add_systems(OnEnter(AppState::InGame), load_textures)
-        .add_systems(OnEnter(AppState::InGame), setup_game_scene)
+        .add_systems(OnEnter(AppState::InGame), setup_game_scene.after(load_textures).run_if(wait_for_textures))
         .add_systems(OnEnter(AppState::Paused), setup_pause_menu)
         .add_systems(OnExit(AppState::Paused), cleanup_pause_menu)
         .add_systems(OnEnter(AppState::MainMenu), cleanup_game_scene)
@@ -1119,6 +1119,20 @@ fn load_textures(
             alpha_mode: AlphaMode::Blend,
             ..default()
         }));
+    }
+}
+
+fn wait_for_textures(
+    _asset_server: Res<AssetServer>,
+    texture_assets: Res<TextureAssets>,
+    images: Res<Assets<Image>>,
+) -> bool {
+    // Return true when textures are loaded
+    if let Some(atlas) = &texture_assets.atlas {
+        // Check if the image is loaded
+        images.get(atlas).is_some()
+    } else {
+        false
     }
 }
 
