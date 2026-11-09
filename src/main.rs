@@ -90,33 +90,48 @@ const MOB_DESPAWN_DISTANCE: f32 = 40.0;
 // ============================================================================
 // MODULE: rendering
 // ============================================================================
-// Handles block visualization, mesh generation, and color mapping
+// Handles block visualization, mesh generation, and texture mapping
 // Pure functions that don't require mutable state beyond input parameters
 mod rendering {
     use super::*;
 
-    /// Generate mesh vertex colors based on block type and face direction
-    /// Includes shading for depth perception
-    pub fn block_color(block: u8, face: usize) -> [f32; 4] {
-        let (r, g, b) = match (block, face) {
-            (GRASS, 2) => (0.25, 0.68, 0.24),
-            (GRASS, _) => (0.42, 0.31, 0.18),
-            (DIRT, _) => (0.42, 0.31, 0.18),
-            (STONE, _) => (0.48, 0.50, 0.52),
-            (SAND, _) => (0.82, 0.72, 0.45),
-            (WOOD, 2 | 3) => (0.58, 0.38, 0.18),
-            (WOOD, _) => (0.39, 0.24, 0.11),
-            (LEAVES, _) => (0.19, 0.52, 0.22),
-            _ => (1.0, 0.0, 1.0),
+    /// Get UV coordinates in the atlas for a block type
+    /// Atlas is 16x16 grid, each tile is 1/16th of the texture
+    /// Returns (u_min, v_min, u_max, v_max) in normalized coordinates [0, 1]
+    pub fn block_uv(block: u8, face: usize) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+        // Map block type to atlas tile position
+        // Special case: GRASS has different top and side textures
+        let tile_id = if block == GRASS && face == 2 {
+            2  // Grass top is tile 2 (green)
+        } else {
+            block as usize
         };
-        let shade = if face == 3 {
+        
+        let tile_x = tile_id % 16;
+        let tile_y = tile_id / 16;
+        let uv_min_x = tile_x as f32 / 16.0;
+        let uv_max_x = (tile_x as f32 + 1.0) / 16.0;
+        let uv_min_y = tile_y as f32 / 16.0;
+        let uv_max_y = (tile_y as f32 + 1.0) / 16.0;
+        
+        // Return UV corners: (bottom-left, bottom-right, top-right, top-left)
+        (
+            [uv_min_x, uv_min_y],
+            [uv_max_x, uv_min_y],
+            [uv_max_x, uv_max_y],
+            [uv_min_x, uv_max_y],
+        )
+    }
+
+    /// Get shading multiplier based on face direction for depth perception
+    pub fn face_shade(face: usize) -> f32 {
+        if face == 3 {
             0.72
         } else if face == 0 || face == 1 {
             0.86
         } else {
             1.0
-        };
-        [r * shade, g * shade, b * shade, 1.0]
+        }
     }
 
     /// Create an empty mesh (used when chunk has no visible faces)
@@ -127,7 +142,7 @@ mod rendering {
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
         mesh.insert_indices(Indices::U32(Vec::new()));
         mesh
     }
@@ -175,7 +190,7 @@ mod rendering {
     pub fn build_chunk_mesh(world: &WorldData, coord: IVec3) -> Mesh {
         let mut positions = Vec::<[f32; 3]>::new();
         let mut normals = Vec::<[f32; 3]>::new();
-        let mut colors = Vec::<[f32; 4]>::new();
+        let mut uvs = Vec::<[f32; 2]>::new();
         let mut indices = Vec::<u32>::new();
         let Some(chunk) = world.chunks.get(&coord) else {
             return empty_mesh();
@@ -239,11 +254,15 @@ mod rendering {
                                 origin + u_direction,
                             ]
                         };
+                        
+                        let (uv0, uv1, uv2, uv3) = block_uv(block, face_index);
+                        let _shade = face_shade(face_index);
+                        
                         let base = positions.len() as u32;
-                        for corner in corners {
+                        for (corner, uv) in corners.iter().zip([uv0, uv1, uv2, uv3].iter()) {
                             positions.push(corner.to_array());
                             normals.push(normal.as_vec3().to_array());
-                            colors.push(block_color(block, face_index));
+                            uvs.push(*uv);
                         }
                         indices.extend_from_slice(&[
                             base,
@@ -264,7 +283,7 @@ mod rendering {
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
         mesh.insert_indices(Indices::U32(indices));
         mesh
     }
@@ -290,6 +309,7 @@ fn main() {
         .init_resource::<CraftingUi>()
         .init_resource::<WorldForm>()
         .init_resource::<PendingWorld>()
+        .init_resource::<TextureAssets>()
         .init_resource::<WorldStorage>()
         .init_resource::<LoadingProgress>()
         .init_resource::<DayNightCycle>()
@@ -305,6 +325,7 @@ fn main() {
         .add_systems(OnEnter(AppState::LoadingWorld), begin_loading_world)
         .add_systems(OnEnter(AppState::LoadingWorld), setup_loading_screen)
         .add_systems(OnExit(AppState::LoadingWorld), cleanup_menu)
+        .add_systems(OnEnter(AppState::InGame), load_textures)
         .add_systems(OnEnter(AppState::InGame), setup_game_scene)
         .add_systems(OnEnter(AppState::Paused), setup_pause_menu)
         .add_systems(OnExit(AppState::Paused), cleanup_pause_menu)
@@ -466,6 +487,11 @@ struct PendingWorld {
     save: Option<WorldSave>,
     path: Option<PathBuf>,
     is_new_world: bool,
+}
+
+#[derive(Resource, Default)]
+struct TextureAssets {
+    atlas: Option<Handle<Image>>,
 }
 
 #[derive(Resource)]
@@ -1004,6 +1030,15 @@ fn set_generated_block(chunk: &mut Chunk, x: i32, y: i32, z: i32, block: u8) {
     if (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&y) && (0..CHUNK_SIZE).contains(&z)
     {
         chunk.set(IVec3::new(x, y, z), block);
+    }
+}
+
+fn load_textures(
+    asset_server: Res<AssetServer>,
+    mut texture_assets: ResMut<TextureAssets>,
+) {
+    if texture_assets.atlas.is_none() {
+        texture_assets.atlas = Some(asset_server.load("texture_atlas.png"));
     }
 }
 
@@ -2938,6 +2973,7 @@ fn loading_world_step(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut status: Query<&mut Text, With<LoadingText>>,
     mut next: ResMut<NextState<AppState>>,
+    texture_assets: Res<TextureAssets>,
 ) {
     if !progress.initialized {
         return;
@@ -2970,7 +3006,7 @@ fn loading_world_step(
             if let Some(coord) = progress.coordinates.pop() {
                 if progress.material.is_none() {
                     progress.material = Some(materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
+                        base_color_texture: texture_assets.atlas.clone(),
                         ..default()
                     }));
                 }
