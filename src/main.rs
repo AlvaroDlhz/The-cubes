@@ -4001,6 +4001,9 @@ fn move_player(
         return;
     };
 
+    // Validate player is not stuck in blocks
+    transform.translation = find_safe_spawn_position(&world, transform.translation);
+
     if keys.just_pressed(KeyCode::KeyF) {
         player.flying = !player.flying;
         player.velocity = Vec3::ZERO;
@@ -4430,6 +4433,29 @@ fn can_spawn_mob(kind: MobKind, total: usize, grazers: usize, stalkers: usize) -
             MobKind::Grazer => grazers < MAX_PASSIVE_MOBS,
             MobKind::NightStalker => stalkers < MAX_HOSTILE_MOBS,
         }
+}
+
+/// Find a safe spawn position by checking if player is stuck in blocks
+/// and teleporting to ground level if needed
+fn find_safe_spawn_position(world: &WorldData, mut position: Vec3) -> Vec3 {
+    let ground_x = position.x.floor() as i32;
+    let ground_z = position.z.floor() as i32;
+    
+    // Check if player is inside a solid block
+    for offset_y in -2..=2 {
+        let check_pos = IVec3::new(ground_x, position.y as i32 + offset_y, ground_z);
+        if block_at(world, check_pos) != AIR {
+            // Player is stuck, find safe ground height
+            if let Some(height) = mob_ground_height(world, ground_x, ground_z) {
+                position.y = (height as f32) + PLAYER_EYE_HEIGHT;
+                return position;
+            }
+            // If we can't find ground, teleport higher
+            position.y = (position.y as i32 + 5) as f32;
+            return position;
+        }
+    }
+    position
 }
 
 fn mob_ground_height(world: &WorldData, x: i32, z: i32) -> Option<i32> {
