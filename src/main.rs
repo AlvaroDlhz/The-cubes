@@ -5027,33 +5027,6 @@ fn block_index(local: IVec3) -> usize {
     (local.x + CHUNK_SIZE * (local.z + CHUNK_SIZE * local.y)) as usize
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Biome {
-    Plains,
-    Forest,
-    Desert,
-    Mountain,
-}
-
-impl Biome {
-    fn surface_block(self) -> u8 {
-        match self {
-            Self::Plains | Self::Forest => GRASS,
-            Self::Desert => SAND,
-            Self::Mountain => STONE,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Plains => "Pradera",
-            Self::Forest => "Bosque",
-            Self::Desert => "Desierto",
-            Self::Mountain => "Montaña",
-        }
-    }
-}
-
 fn biome_at(x: i32, z: i32, seed: u64) -> Biome {
     let temperature = value_noise(x, z, seed ^ 0xA076_1D64_78BD_642F, 0.012);
     let moisture = value_noise(x, z, seed ^ 0xE703_7ED1_A0B4_28DB, 0.018);
@@ -5369,10 +5342,10 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            biomes,
-            HashSet::from([Biome::Plains, Biome::Forest, Biome::Desert, Biome::Mountain])
-        );
+        assert!(biomes.contains(&Biome::Plains));
+        assert!(biomes.contains(&Biome::Forest));
+        assert!(biomes.contains(&Biome::Desert));
+        assert!(biomes.contains(&Biome::Mountain));
         assert!(found_mountain);
         assert!(found_desert);
         assert!(present.contains(&GRASS));
@@ -5381,6 +5354,14 @@ mod tests {
         assert!(present.contains(&SAND));
         assert!(present.contains(&WOOD));
         assert!(present.contains(&LEAVES));
+        
+        // Test that new block types are properly defined
+        assert_ne!(ICE, AIR);
+        assert_ne!(SNOW, AIR);
+        assert_ne!(MUD, AIR);
+        assert_ne!(OBSIDIAN, AIR);
+        assert_ne!(GRAVEL, AIR);
+        
         assert_eq!(
             generate_chunk(IVec3::new(-4, 0, -4), 42).blocks,
             deterministic_chunk.blocks

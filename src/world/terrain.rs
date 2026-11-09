@@ -2,12 +2,17 @@ use crate::blocks::*;
 use crate::world::Chunk;
 use bevy::prelude::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Biome {
     Plains,
     Forest,
     Desert,
     Mountain,
+    Tundra,
+    Beach,
+    Swamp,
+    Volcano,
+    Cave,
 }
 
 impl Biome {
@@ -15,7 +20,11 @@ impl Biome {
         match self {
             Self::Plains | Self::Forest => GRASS,
             Self::Desert => SAND,
-            Self::Mountain => STONE,
+            Self::Mountain | Self::Volcano => STONE,
+            Self::Tundra => SNOW,
+            Self::Beach => SAND,
+            Self::Swamp => MUD,
+            Self::Cave => STONE,
         }
     }
 
@@ -25,6 +34,11 @@ impl Biome {
             Self::Forest => "Bosque",
             Self::Desert => "Desierto",
             Self::Mountain => "Montaña",
+            Self::Tundra => "Tundra",
+            Self::Beach => "Playa",
+            Self::Swamp => "Pantano",
+            Self::Volcano => "Volcán",
+            Self::Cave => "Cueva",
         }
     }
 }
@@ -44,6 +58,36 @@ pub fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                     SAND
                 } else if biome == Biome::Mountain && y < height - 3 {
                     STONE
+                } else if biome == Biome::Tundra && y >= height - 2 {
+                    if y == height {
+                        SNOW
+                    } else {
+                        ICE
+                    }
+                } else if biome == Biome::Beach && y >= height - 2 {
+                    SAND
+                } else if biome == Biome::Swamp && y >= height - 2 {
+                    if y == height {
+                        MUD
+                    } else {
+                        DIRT
+                    }
+                } else if biome == Biome::Volcano && y >= height - 2 {
+                    if coordinate_hash(world_x, world_z, seed ^ 0x9999) % 100 < 15 {
+                        OBSIDIAN
+                    } else {
+                        STONE
+                    }
+                } else if biome == Biome::Cave {
+                    if y < height / 3 {
+                        if coordinate_hash_3d(world_x, y as i32, world_z, seed ^ 0x3333) % 100 < 8 {
+                            OBSIDIAN
+                        } else {
+                            STONE
+                        }
+                    } else {
+                        STONE
+                    }
                 } else if y >= height - 3 {
                     DIRT
                 } else {
@@ -134,6 +178,82 @@ pub fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
             }
         }
     }
+
+    // Generate tundra ice ponds
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Tundra {
+                continue;
+            }
+            // Sparse ice patches on surface
+            if coordinate_hash(world_x, world_z, seed ^ 0x4444_5555) % 100 < 3 {
+                let height = terrain_height(world_x, world_z, seed);
+                let ice_y = height + 1;
+                if (0..CHUNK_SIZE).contains(&ice_y) {
+                    chunk.set(x, ice_y, z, ICE);
+                }
+            }
+        }
+    }
+
+    // Generate swamp vegetation
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Swamp {
+                continue;
+            }
+            let height = terrain_height(world_x, world_z, seed);
+            // Mushrooms are common in swamps
+            if coordinate_hash(world_x, world_z, seed ^ 0x6666_7777) % 100 < 12 {
+                let mushroom_y = height + 1;
+                if (0..CHUNK_SIZE).contains(&mushroom_y) {
+                    chunk.set(x, mushroom_y, z, MUSHROOM);
+                }
+            }
+        }
+    }
+
+    // Generate volcano lava vents
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Volcano {
+                continue;
+            }
+            let height = terrain_height(world_x, world_z, seed);
+            // Lava pockets near the top
+            if coordinate_hash(world_x, world_z, seed ^ 0x8888_9999) % 100 < 6 {
+                let lava_y = height.saturating_sub(2);
+                if (0..CHUNK_SIZE).contains(&lava_y) && lava_y > 5 {
+                    chunk.set(x, lava_y, z, LAVA);
+                }
+            }
+        }
+    }
+
+    // Generate cave minerals (sparse gravel and obsidian)
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Cave {
+                continue;
+            }
+            let height = terrain_height(world_x, world_z, seed);
+            // Gravel in cave floors
+            if coordinate_hash(world_x, world_z, seed ^ 0xAAAA_BBBB) % 100 < 8 {
+                let gravel_y = height.saturating_sub(3);
+                if (0..CHUNK_SIZE).contains(&gravel_y) {
+                    chunk.set(x, gravel_y, z, GRAVEL);
+                }
+            }
+        }
+    }
     chunk
 }
 
@@ -141,16 +261,36 @@ pub fn biome_at(x: i32, z: i32, seed: u64) -> Biome {
     let temperature = value_noise(x, z, seed ^ 0xA076_1D64_78BD_642F, 0.012);
     let moisture = value_noise(x, z, seed ^ 0xE703_7ED1_A0B4_28DB, 0.018);
     let mountain = value_noise(x, z, seed ^ 0x8EBC_6AF0_9C88_C6E3, 0.012);
+    let elevation = value_noise(x, z, seed ^ 0xDEAD_BEEF_CAFE_BABE, 0.008);
+    let cave_factor = value_noise(x, z, seed ^ 0x1111_2222_3333_4444, 0.025);
+    
     let mountain_weight = smoothstep(0.64, 0.80, mountain);
     let desert_weight =
         smoothstep(0.58, 0.78, temperature) * (1.0 - smoothstep(0.38, 0.60, moisture));
     let forest_weight =
         smoothstep(0.54, 0.72, moisture) * (1.0 - smoothstep(0.72, 0.88, temperature));
+    let tundra_weight = smoothstep(0.78, 0.92, temperature).max(0.0);
+    let swamp_weight = smoothstep(0.68, 0.78, moisture) * smoothstep(0.38, 0.52, temperature);
+    let beach_weight = smoothstep(0.48, 0.56, elevation);
+    let volcano_weight = smoothstep(0.80, 0.92, mountain) * smoothstep(0.12, 0.20, temperature);
 
-    if mountain_weight > 0.55 {
+    // Caves have priority if cave factor is high
+    if cave_factor > 0.75 && elevation < 0.45 {
+        return Biome::Cave;
+    }
+
+    if volcano_weight > 0.35 {
+        Biome::Volcano
+    } else if tundra_weight > 0.65 {
+        Biome::Tundra
+    } else if mountain_weight > 0.55 {
         Biome::Mountain
+    } else if beach_weight > 0.40 {
+        Biome::Beach
     } else if desert_weight > 0.15 && desert_weight >= forest_weight {
         Biome::Desert
+    } else if swamp_weight > 0.15 {
+        Biome::Swamp
     } else if forest_weight > 0.28 {
         Biome::Forest
     } else {
@@ -196,6 +336,16 @@ pub fn coordinate_hash(x: i32, z: i32, seed: u64) -> u64 {
     let mut value = seed
         ^ (x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (z as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+pub fn coordinate_hash_3d(x: i32, y: i32, z: i32, seed: u64) -> u64 {
+    let mut value = seed
+        ^ (x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (z as i64 as u64).wrapping_mul(0x85EB_CA6B_7EA7_735F);
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)

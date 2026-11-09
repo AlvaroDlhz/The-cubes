@@ -19,7 +19,13 @@ pub const SLAB: u8 = 12;
 pub const BRICKS: u8 = 13;
 pub const PLANKS: u8 = 14;
 pub const TORCH: u8 = 15;
-pub const BLOCK_COUNT: usize = TORCH as usize + 1;
+pub const ICE: u8 = 16;
+pub const SNOW: u8 = 17;
+pub const OBSIDIAN: u8 = 18;
+pub const LAVA: u8 = 19;
+pub const MUD: u8 = 20;
+pub const GRAVEL: u8 = 21;
+pub const BLOCK_COUNT: usize = GRAVEL as usize + 1;
 pub const LEGACY_BLOCK_COUNT: usize = 4;
 
 use bevy::prelude::*;
@@ -118,13 +124,19 @@ pub fn block_type_name(block: u8) -> &'static str {
         BRICKS => "Bricks",
         PLANKS => "Planks",
         TORCH => "Torch",
+        ICE => "Ice",
+        SNOW => "Snow",
+        OBSIDIAN => "Obsidian",
+        LAVA => "Lava",
+        MUD => "Mud",
+        GRAVEL => "Gravel",
         _ => "Unknown",
     }
 }
 
 pub fn is_block_solid(block_type: u8, door_states: &std::collections::HashMap<IVec3, DoorState>, pos: IVec3) -> bool {
     match block_type {
-        AIR => false,
+        AIR | LAVA => false,
         WOODEN_DOOR => {
             if let Some(&state) = door_states.get(&pos) {
                 !matches!(state, DoorState::Open)

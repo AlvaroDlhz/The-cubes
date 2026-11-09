@@ -122,6 +122,11 @@ impl Inventory {
                 | crate::blocks::BRICKS
                 | crate::blocks::PLANKS
                 | crate::blocks::TORCH
+                | crate::blocks::ICE
+                | crate::blocks::SNOW
+                | crate::blocks::OBSIDIAN
+                | crate::blocks::MUD
+                | crate::blocks::GRAVEL
         ) {
             return false;
         }
