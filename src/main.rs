@@ -15,6 +15,18 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
+// Module declarations
+mod blocks;
+mod mobs;
+mod world;
+mod systems;
+
+// Selective imports from modules
+use blocks::*;
+use mobs::*;
+use world::*;
+use systems::*;
+
 const CHUNK_SIZE: i32 = 16;
 const CHUNK_VOLUME: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize;
 const AIR: u8 = 0;
