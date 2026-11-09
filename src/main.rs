@@ -95,10 +95,60 @@ const MOB_DESPAWN_DISTANCE: f32 = 40.0;
 mod rendering {
     use super::*;
 
-    /// Get UV coordinates in the atlas for a block type
+    /// Get texture variant (0-3) based on world position
+    /// Uses block coordinates to deterministically select variant
+    /// Ensures same block at same location always has same texture
+    pub fn block_variant(x: i32, y: i32, z: i32) -> u32 {
+        // Create a simple hash from coordinates
+        let hash = ((x.wrapping_mul(73856093) 
+                   ^ y.wrapping_mul(19349663) 
+                   ^ z.wrapping_mul(83492791)) as u32).wrapping_mul(2654435761);
+        hash % 4
+    }
+
+    /// Rotate UV coordinates by 90 degrees clockwise
+    /// Transforms (p0, p1, p2, p3) where p3 is top-left
+    fn rotate_uv_90(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+        // Rotate 90 degrees: corners shift in order
+        (uv3, uv0, uv1, uv2)
+    }
+
+    /// Rotate UV coordinates by 180 degrees
+    fn rotate_uv_180(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+        (uv2, uv3, uv0, uv1)
+    }
+
+    /// Rotate UV coordinates by 270 degrees clockwise (90 counter-clockwise)
+    fn rotate_uv_270(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+        (uv1, uv2, uv3, uv0)
+    }
+
+    /// Apply texture variant rotation to UV coordinates
+    /// Variant 0: No rotation
+    /// Variant 1: 90 degrees
+    /// Variant 2: 180 degrees
+    /// Variant 3: 270 degrees
+    fn apply_variant(
+        variant: u32,
+        uv0: [f32; 2],
+        uv1: [f32; 2],
+        uv2: [f32; 2],
+        uv3: [f32; 2],
+    ) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+        match variant {
+            0 => (uv0, uv1, uv2, uv3),
+            1 => rotate_uv_90(uv0, uv1, uv2, uv3),
+            2 => rotate_uv_180(uv0, uv1, uv2, uv3),
+            3 => rotate_uv_270(uv0, uv1, uv2, uv3),
+            _ => (uv0, uv1, uv2, uv3),
+        }
+    }
+
+    /// Get UV coordinates in the atlas for a block type with variant rotation
     /// Atlas is 16x16 grid, each tile is 1/16th of the texture
     /// Returns (u_min, v_min, u_max, v_max) in normalized coordinates [0, 1]
-    pub fn block_uv(block: u8, face: usize) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+    /// Applies rotation based on variant parameter
+    pub fn block_uv(block: u8, face: usize, variant: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
         // Map block type to atlas tile position
         // Special case: GRASS has different top and side textures
         let tile_id = if block == GRASS && face == 2 {
@@ -114,13 +164,14 @@ mod rendering {
         let uv_min_y = tile_y as f32 / 16.0;
         let uv_max_y = (tile_y as f32 + 1.0) / 16.0;
         
-        // Return UV corners: (bottom-left, bottom-right, top-right, top-left)
-        (
-            [uv_min_x, uv_min_y],
-            [uv_max_x, uv_min_y],
-            [uv_max_x, uv_max_y],
-            [uv_min_x, uv_max_y],
-        )
+        // Base UV corners: (bottom-left, bottom-right, top-right, top-left)
+        let base_uv0 = [uv_min_x, uv_min_y];
+        let base_uv1 = [uv_max_x, uv_min_y];
+        let base_uv2 = [uv_max_x, uv_max_y];
+        let base_uv3 = [uv_min_x, uv_max_y];
+        
+        // Apply variant rotation
+        apply_variant(variant, base_uv0, base_uv1, base_uv2, base_uv3)
     }
 
     /// Get shading multiplier based on face direction for depth perception
@@ -255,7 +306,9 @@ mod rendering {
                             ]
                         };
                         
-                        let (uv0, uv1, uv2, uv3) = block_uv(block, face_index);
+                        let block_pos = (coord * CHUNK_SIZE + origin.as_ivec3()).to_array();
+                        let variant = block_variant(block_pos[0], block_pos[1], block_pos[2]);
+                        let (uv0, uv1, uv2, uv3) = block_uv(block, face_index, variant);
                         let _shade = face_shade(face_index);
                         
                         let base = positions.len() as u32;
