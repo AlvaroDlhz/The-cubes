@@ -1,4 +1,32 @@
 # The Cubes
+## Arquitectura del Proyecto
+
+A partir de la versión modular, el proyecto se organiza en módulos bien definidos:
+
+```
+src/
+├── main.rs              Punto de entrada y sistema de juego
+├── lib.rs               Exports de módulos públicos
+├── blocks/              Tipos de bloques y constantes
+│   └── mod.rs          Block IDs, FoodType, DoorState, CraftRecipe, is_block_solid()
+├── mobs/                Sistemas de criaturas
+│   └── mod.rs          Mob, MobKind, MobPopulation, MobAssets
+├── world/               Datos y lógica del mundo
+│   ├── mod.rs          WorldData, Chunk, ChunkMesh, LoadingProgress
+│   ├── terrain.rs      Generación procedural (Biome, generate_chunk, biome_at)
+│   ├── collision.rs    Física y colisiones (block_at, collides_with_world, light_level_at)
+│   └── save.rs         Persistencia (WorldSave, snapshot_world, load_world_save)
+└── systems/             Sistemas de juego
+    └── mod.rs          Player, Inventory, Survival, UI components
+```
+
+**Beneficios de la modularización:**
+- ✅ Claridad: Cada módulo tiene responsabilidad única
+- ✅ Mantenibilidad: Más fácil localizar y editar código relacionado
+- ✅ Escalabilidad: Preparado para crecimiento a 10,000+ LOC
+- ✅ Pruebas: Los tests están colocados junto al código que prueban
+- ✅ Colaboración: Facilita revisión de código y contribuciones
+
 
 Prototipo voxel en Rust + Bevy para explorar un sandbox de bloques original.
 No utiliza assets ni contenido de Minecraft.
