@@ -80,7 +80,7 @@ pub fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                     }
                 } else if biome == Biome::Cave {
                     if y < height / 3 {
-                        if coordinate_hash_3d(world_x, y as i32, world_z, seed ^ 0x3333) % 100 < 8 {
+                        if coordinate_hash_3d(world_x, y, world_z, seed ^ 0x3333) % 100 < 8 {
                             OBSIDIAN
                         } else {
                             STONE
@@ -132,7 +132,7 @@ pub fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                             if chunk.get(local.x, local.y, local.z) == AIR {
                                 chunk.set(local.x, local.y, local.z, LEAVES);
                                 // Occasionally spawn apples in leaves
-                                if coordinate_hash(world_x ^ leaf_x as i32, leaf_y as i32, seed ^ 0x5C0F) % 100 < 15 {
+                                if coordinate_hash(world_x ^ leaf_x, leaf_y, seed ^ 0x5C0F) % 100 < 15 {
                                     chunk.set(local.x, local.y, local.z, APPLE);
                                 }
                             }

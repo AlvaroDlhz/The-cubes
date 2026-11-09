@@ -39,12 +39,9 @@ pub fn collides_with_world(world: &WorldData, min: Vec3, max: Vec3) -> bool {
 }
 
 pub fn find_ceiling_or_ground(world: &WorldData, x: i32, z: i32, max_y: i32, step: i32) -> Option<i32> {
-    for y in (0..=max_y).step_by(step as usize) {
-        if block_at(world, IVec3::new(x, y, z)) != AIR {
-            return Some(y);
-        }
-    }
-    None
+    (0..=max_y)
+        .step_by(step as usize)
+        .find(|&y| block_at(world, IVec3::new(x, y, z)) != AIR)
 }
 
 pub fn mob_ground_height(world: &WorldData, x: i32, z: i32) -> Option<i32> {
@@ -64,13 +61,13 @@ pub fn light_level_at(world: &WorldData, pos: IVec3) -> f32 {
     // Add torch light contribution
     let mut torch_light: f32 = 0.0;
     let pos_f = pos.as_vec3();
-    for (torch_pos, _) in &world.door_states {
+    for torch_pos in world.door_states.keys() {
         // For simplicity, check if there are blocks around that could be torches
         // This is a placeholder - a full implementation would track torch positions separately
         let distance = pos_f.distance(torch_pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5));
-        if distance <= 64.0 && distance <= 8.0 {
-            let contribution = (64.0 - distance) / 8.0;
-            torch_light = torch_light.max(contribution as f32);
+        if distance <= 8.0 {
+            let contribution = (8.0 - distance) / 8.0;
+            torch_light = torch_light.max(contribution);
         }
     }
     

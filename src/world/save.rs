@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;

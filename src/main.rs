@@ -1,3 +1,10 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::unnecessary_sort_by)]
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -761,7 +768,7 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                             if chunk.get(local) == AIR {
                                 chunk.set(local, LEAVES);
                                 // Occasionally spawn apples in leaves
-                                if coordinate_hash(world_x ^ leaf_x as i32, leaf_y as i32, seed ^ 0x5C0F) % 100 < 15 {
+                                if coordinate_hash(world_x ^ leaf_x, leaf_y, seed ^ 0x5C0F) % 100 < 15 {
                                     chunk.set(local, APPLE);
                                 }
                             }
@@ -2347,8 +2354,7 @@ fn setup_hud(commands: &mut Commands) {
                 BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.72)),
             ))
             .with_children(|hotbar| {
-                for slot_index in 0..HOTBAR_SLOT_COUNT {
-                    let block = HOTBAR_BLOCKS[slot_index];
+                for (slot_index, &block) in HOTBAR_BLOCKS.iter().enumerate().take(HOTBAR_SLOT_COUNT) {
                     let color = match block {
                         GRASS => Color::srgb(0.25, 0.62, 0.22),
                         DIRT => Color::srgb(0.43, 0.30, 0.18),
@@ -4402,7 +4408,7 @@ fn ray_sphere_distance(origin: Vec3, direction: Vec3, center: Vec3, radius: f32)
     } else {
         -projection + discriminant.sqrt()
     };
-    (distance >= 0.0 && distance <= REACH).then_some(distance)
+    (0.0..=REACH).contains(&distance).then_some(distance)
 }
 
 fn collides_with_world(world: &WorldData, eye_position: Vec3) -> bool {
@@ -4794,7 +4800,7 @@ fn edit_blocks(
             }
         }
         if block == LEAVES
-            && (coordinate_hash(target.x, target.z, world.seed) ^ target.y as u64) % 3 == 0
+            && (coordinate_hash(target.x, target.z, world.seed) ^ target.y as u64).is_multiple_of(3)
         {
             survival.food = survival.food.saturating_add(1).min(99);
             survival.notice = "Encontraste una baya.".into();
@@ -4860,7 +4866,7 @@ fn rebuild_dirty_chunks(
     if world.dirty.is_empty() {
         return;
     }
-    let dirty = world.dirty.drain().collect::<HashSet<_>>();
+    let dirty = std::mem::take(&mut world.dirty);
     for (chunk, mesh_handle) in &mut chunk_entities {
         if dirty.contains(&chunk.0) {
             let Some(mesh) = meshes.get_mut(&mesh_handle.0) else {
@@ -4982,7 +4988,7 @@ fn is_block_solid(world: &WorldData, position: IVec3) -> bool {
 
 fn light_level_at(world: &WorldData, position: IVec3) -> f32 {
     // Direct sunlight depends on height above surface
-    let surface_height = terrain_height(position.x, position.z, world.seed) as i32;
+    let surface_height = terrain_height(position.x, position.z, world.seed);
     let base_light = if position.y >= surface_height {
         15.0 // Full sunlight above surface
     } else {

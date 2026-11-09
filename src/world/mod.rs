@@ -72,7 +72,7 @@ pub struct WorldStorage {
     pub exists: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Chunk {
     pub blocks: Vec<u8>,
 }
@@ -85,7 +85,10 @@ impl Chunk {
     }
 
     pub fn get(&self, x: i32, y: i32, z: i32) -> u8 {
-        if y < 0 || y >= crate::blocks::CHUNK_SIZE || x < 0 || x >= crate::blocks::CHUNK_SIZE || z < 0 || z >= crate::blocks::CHUNK_SIZE {
+        if !(0..crate::blocks::CHUNK_SIZE).contains(&y)
+            || !(0..crate::blocks::CHUNK_SIZE).contains(&x)
+            || !(0..crate::blocks::CHUNK_SIZE).contains(&z)
+        {
             0
         } else {
             let idx = (y as usize) * 256 + (z as usize) * 16 + (x as usize);
@@ -94,7 +97,10 @@ impl Chunk {
     }
 
     pub fn set(&mut self, x: i32, y: i32, z: i32, block: u8) {
-        if y >= 0 && y < crate::blocks::CHUNK_SIZE && x >= 0 && x < crate::blocks::CHUNK_SIZE && z >= 0 && z < crate::blocks::CHUNK_SIZE {
+        if (0..crate::blocks::CHUNK_SIZE).contains(&y)
+            && (0..crate::blocks::CHUNK_SIZE).contains(&x)
+            && (0..crate::blocks::CHUNK_SIZE).contains(&z)
+        {
             let idx = (y as usize) * 256 + (z as usize) * 16 + (x as usize);
             self.blocks[idx] = block;
         }
