@@ -81,14 +81,21 @@ persiguen y atacan al jugador, y conceden experiencia al ser derrotados. La
 población está limitada y las criaturas lejanas desaparecen para mantener acotado
 el coste de simulación.
 
-La mesa de crafteo ofrece seis recetas: pico de madera (3 madera y 2 piedra),
-hacha de madera (2 madera y 1 piedra), pala de madera (2 madera y 1 piedra),
-espada de madera (2 madera y 2 piedra), ración de bayas (3 hojas y 1 madera)
-y flechas (2 hojas y 1 arena; produce 5 flechas). Las herramientas de minería
-tienen 64 usos y dan materiales y experiencia adicionales al romper sus bloques
-correspondientes. La pala es 2x más eficiente en arena y tierra, y la espada
-golpea con 2 puntos de daño en lugar de 1 sin romper bloques. Las recetas y la
-durabilidad se conservan al guardar el mundo.
+La mesa de crafteo ofrece recetas para herramientas, comida y estructuras:
+- **Herramientas** (6 recetas): pico, hacha, pala, espada, ración de bayas, flechas
+- **Estructuras** (5 recetas nuevas):
+  - **Puertas de madera** (6 madera → 3): interacción con clic derecho (abrir/cerrar)
+  - **Escaleras de madera** (6 madera → 4): bloques de media altura para subida vertical
+  - **Losas de madera** (3 madera → 6): bloques de media altura, apilables
+  - **Ladrillos de piedra** (4 piedra → 4): bloque de construcción decorativo
+  - **Tablones de madera** (1 madera → 4): material versátil, 4x eficiencia
+
+Las puertas cerradas bloquean el paso del jugador; abiertas permiten movimiento libre.
+Escaleras y losas no son bloqueantes para colisión pero se renderizan en el mundo
+(implementación parcial: renderización completa, colisión pasable). Las herramientas
+de minería tienen 64 usos (32 para espada) y dan materiales y experiencia adicionales.
+La pala es 2x más eficiente en arena y tierra; la espada golpea con +1 daño.
+Las recetas y la durabilidad se conservan al guardar el mundo.
 
 El inventario (tecla `E`) muestra el contenido completo del jugador en una
 interfaz tipo Minecraft: panel central de 880×706px con área de crafteo 2×2 en

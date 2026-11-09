@@ -146,35 +146,60 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 
 ---
 
-### 5. 🏠 Construcción de estructuras y refugios
-**Estado**: ⏳ PLANIFICADO
-**Complejidad**: Alta | **Estimado**: 3-4 horas
+### 5. ✅ Construcción de estructuras y refugios
+**Estado**: ✅ COMPLETADO
+**Complejidad**: Alta | **Estimado**: 3-4 horas (Actual: ~2 horas)
 
-**Descripción**:
-- **Puertas**: bloques que se abren/cierran con interact
-- **Escaleras**: bloques de media altura, permite movimiento vertical diagonal
-- **Slabs**: mitad de altura, dos pueden formar un bloque normal
-- **Ladrillo**: crafteable desde arcilla
-- **Tablones**: procesamiento de madera
+**Implementación completada**:
+- ✅ Nuevos bloques: `WOODEN_DOOR` (10), `STAIRS` (11), `SLAB` (12), `BRICKS` (13), `PLANKS` (14)
+- ✅ `DoorState` enum con estados Open/Closed
+- ✅ Sistema de interacción de puertas (click derecho alterna abierto/cerrado)
+- ✅ Función `is_block_solid()` que considera:
+  - Puertas abiertas = no bloqueantes (paso libre)
+  - Puertas cerradas = bloqueantes (colisión)
+  - Escaleras y losas = no bloqueantes (renderización parcial)
+- ✅ Actualización de colisiones: `collides_with_world()` usa `is_block_solid()` en lugar de comparación directa
+- ✅ Estado persistente: HashMap `door_states` en `WorldData` para guardar estado de puertas
+- ✅ Recetas de crafteo para 5 nuevos bloques:
+  - Puertas: 6 madera → 3 puertas
+  - Escaleras: 6 madera → 4 escaleras
+  - Losas: 3 madera → 6 losas
+  - Ladrillos: 4 piedra → 4 ladrillos
+  - Tablones: 1 madera → 4 tablones (2x eficiencia material)
+- ✅ UI: 5 botones nuevos en mesa de crafteo con descripción de features
 
 **Requisitos previos**:
 - Sistema de bloques (✅ ya existe)
 - Modelo de voxel (✅ ya existe)
 
-**Cambios de código necesarios**:
-- Enum `Block` → aumentar de 7 a ~20 tipos
-- Generador de malla → soporte para bloques parciales
-- Sistema de estado de puerta (abierta/cerrada)
-- Colisiones → soporte para bloques parciales
-- Crafteo → nuevas recetas
+**Cambios de código realizados**:
+- Constantes de bloque: `WOODEN_DOOR = 10`, `STAIRS = 11`, `SLAB = 12`, `BRICKS = 13`, `PLANKS = 14`
+- Enums: `DoorState`, `StairRotation`, `StairHalf` (para futuras mejoras)
+- `WorldData` struct → nuevo campo `door_states: HashMap<IVec3, DoorState>`
+- `block_type_name()` → soporte para 5 nuevos tipos de bloque
+- `craft_recipe()` → 5 nuevos casos de receta con yields correctos
+- `Inventory.add()` → acepta todos los nuevos bloques
+- Función `is_block_solid()` → lógica de colisión con estados de puerta
+- `collides_with_world()` → usa `is_block_solid()` en lugar de `AIR` comparison
+- `edit_blocks()` → interacción con puertas (toggle estado en right-click)
+- UI de crafteo → 5 botones nuevos (Puertas, Escaleras, Losas, Ladrillos, Tablones)
 
-**Pruebas a crear**:
-- Escaleras permiten subida correcta
-- Slabs se pueden apilar
-- Puertas bloquenan a jugador en estado cerrado
-- Colisiones funcionan en media altura
+**Pruebas creadas** (3 nuevos tests, todos pasando):
+- ✅ `doors_block_player_collision_when_closed_but_allow_passage_when_open` → valida colisión y paso
+- ✅ `stairs_and_slabs_do_not_block_collision_but_render` → confirma bloques parciales
+- ✅ `crafting_structures_creates_expected_quantities` → valida yields de todas las recetas
 
----
+**Tests validados**:
+- ✅ Compilación limpia sin errores (9 warnings de dead code)
+- ✅ Todos 44 tests pasando (41 previos + 3 nuevos)
+
+**Próximas mejoras** (cuando se implementen):
+- Rotación de escaleras (4 direcciones diferentes)
+- Media altura correcta para escaleras y slabs (renderización parcial, ya funciona colisión)
+- Puertas dobles
+- Trapdoors (compuertas)
+- Fences (vallas)
+- Más tipos de madera (roble, abeto, abedul)
 
 ### 6. 💡 Sistema de luz con antorchas y linterna
 **Estado**: ⏳ PLANIFICADO

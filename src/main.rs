@@ -27,7 +27,12 @@ const LEAVES: u8 = 6;
 const APPLE: u8 = 7;
 const WHEAT: u8 = 8;
 const MUSHROOM: u8 = 9;
-const BLOCK_COUNT: usize = MUSHROOM as usize + 1;
+const WOODEN_DOOR: u8 = 10;
+const STAIRS: u8 = 11;
+const SLAB: u8 = 12;
+const BRICKS: u8 = 13;
+const PLANKS: u8 = 14;
+const BLOCK_COUNT: usize = PLANKS as usize + 1;
 const LEGACY_BLOCK_COUNT: usize = 4;
 const REACH: f32 = 6.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
@@ -343,6 +348,7 @@ struct WorldData {
     dirty: HashSet<IVec3>,
     name: String,
     seed: u64,
+    door_states: HashMap<IVec3, DoorState>,
 }
 
 #[derive(Resource, Default)]
@@ -499,6 +505,11 @@ enum CraftRecipe {
     WoodenSword,
     BerryRation,
     Arrows,
+    WoodenDoor,
+    Stairs,
+    Slab,
+    Bricks,
+    Planks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,6 +537,28 @@ impl FoodType {
     fn is_poisonous(&self) -> bool {
         matches!(self, FoodType::Mushroom)
     }
+}
+
+// Block state for doors (open/closed)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DoorState {
+    Open,
+    Closed,
+}
+
+// Block state for stairs (rotation and half)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StairRotation {
+    North,
+    South,
+    East,
+    West,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StairHalf {
+    Bottom,
+    Top,
 }
 
 #[derive(Resource, Default)]
@@ -617,7 +650,11 @@ impl Inventory {
     }
 
     fn add(&mut self, block: u8) -> Result<(), u8> {
-        if !matches!(block, GRASS | DIRT | STONE | SAND | WOOD | LEAVES) {
+        if !matches!(
+            block,
+            GRASS | DIRT | STONE | SAND | WOOD | LEAVES | APPLE | WHEAT
+                | MUSHROOM | WOODEN_DOOR | STAIRS | SLAB | BRICKS | PLANKS
+        ) {
             return Err(block);
         }
         let Some(count) = self.counts.get_mut(block as usize) else {
@@ -1649,6 +1686,11 @@ fn block_type_name(block_type: u8) -> &'static str {
         APPLE => "Manzana",
         WHEAT => "Trigo",
         MUSHROOM => "Hongo",
+        WOODEN_DOOR => "Puerta",
+        STAIRS => "Escaleras",
+        SLAB => "Losa",
+        BRICKS => "Ladrillo",
+        PLANKS => "Tablones",
         _ => "Desconocido",
     }
 }
@@ -2090,6 +2132,145 @@ fn setup_hud(commands: &mut Commands) {
                     TextFont::from_font_size(14.0),
                     TextColor(Color::srgb(0.75, 0.8, 0.86)),
                 ));
+                
+                // Feature 5: Structures
+                panel.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(5.0),
+                    TextColor(Color::srgb(0.5, 0.5, 0.5)),
+                ));
+                panel.spawn((
+                    Text::new("═══ ESTRUCTURAS (Feature 5) ═══"),
+                    TextFont::from_font_size(16.0),
+                    TextColor(Color::srgb(0.78, 0.90, 1.0)),
+                ));
+                
+                panel.spawn((
+                    Text::new("Puerta de madera  ·  6 madera  →  3 puertas"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::WoodenDoor),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar puertas (click derecho = abrir/cerrar)"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+                    
+                panel.spawn((
+                    Text::new("Escaleras de madera  ·  6 madera  →  4 bloques"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::Stairs),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar escaleras (subida vertical)"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+                    
+                panel.spawn((
+                    Text::new("Losas de madera  ·  3 madera  →  6 losas"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::Slab),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar losas (media altura, apilables)"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+                    
+                panel.spawn((
+                    Text::new("Ladrillo de piedra  ·  4 piedra  →  4 ladrillos"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::Bricks),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar ladrillos"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+                    
+                panel.spawn((
+                    Text::new("Tablones de madera  ·  1 madera  →  4 tablones"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::Planks),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar tablones (material versátil)"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+
+                panel.spawn((
+                    Text::new("Puertas bloqueadas si están cerradas. Escaleras/losas aún en desarrollo (renderización parcial)."),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::srgb(0.75, 0.8, 0.86)),
+                ));
+                
                 panel.spawn((
                     Text::new(""),
                     TextFont::from_font_size(15.0),
@@ -2834,6 +3015,11 @@ fn craft_recipe(
             }
             &[(LEAVES, 2), (SAND, 1)]
         }
+        CraftRecipe::WoodenDoor => &[(WOOD, 6)],
+        CraftRecipe::Stairs => &[(WOOD, 6)],
+        CraftRecipe::Slab => &[(WOOD, 3)],
+        CraftRecipe::Bricks => &[(STONE, 4)],
+        CraftRecipe::Planks => &[(WOOD, 1)],
     };
 
     if costs
@@ -2880,6 +3066,36 @@ fn craft_recipe(
                 }
             }
             Ok("5 flechas fabricadas. Equipa el arco y dispara con clic derecho.")
+        }
+        CraftRecipe::WoodenDoor => {
+            for _ in 0..3 {
+                let _ = inventory.add(WOODEN_DOOR);
+            }
+            Ok("3 puertas de madera fabricadas.")
+        }
+        CraftRecipe::Stairs => {
+            for _ in 0..4 {
+                let _ = inventory.add(STAIRS);
+            }
+            Ok("4 bloques de escaleras fabricados.")
+        }
+        CraftRecipe::Slab => {
+            for _ in 0..6 {
+                let _ = inventory.add(SLAB);
+            }
+            Ok("6 losas fabricadas.")
+        }
+        CraftRecipe::Bricks => {
+            for _ in 0..4 {
+                let _ = inventory.add(BRICKS);
+            }
+            Ok("4 bloques de ladrillo fabricados.")
+        }
+        CraftRecipe::Planks => {
+            for _ in 0..4 {
+                let _ = inventory.add(PLANKS);
+            }
+            Ok("4 tablones fabricados (2x material).")
         }
     }
 }
@@ -4136,7 +4352,7 @@ fn collides_with_world(world: &WorldData, eye_position: Vec3) -> bool {
     for y in min_block.y..=max_block.y {
         for z in min_block.z..=max_block.z {
             for x in min_block.x..=max_block.x {
-                if block_at(world, IVec3::new(x, y, z)) != AIR {
+                if is_block_solid(world, IVec3::new(x, y, z)) {
                     return true;
                 }
             }
@@ -4427,6 +4643,31 @@ fn edit_blocks(
     let Some((hit, previous, _)) = block_hit else {
         return;
     };
+    
+    // Check for door interaction (right click on door)
+    if place {
+        let (door_chunk_coord, door_local) = block_address(hit);
+        if let Some(door_chunk) = world.chunks.get(&door_chunk_coord) {
+            let current_block = door_chunk.get(door_local);
+            if current_block == WOODEN_DOOR {
+                let state = world.door_states.entry(hit).or_insert(DoorState::Closed);
+                *state = match state {
+                    DoorState::Open => DoorState::Closed,
+                    DoorState::Closed => DoorState::Open,
+                };
+                survival.notice = format!(
+                    "Puerta: {}",
+                    match state {
+                        DoorState::Open => "Abierta",
+                        DoorState::Closed => "Cerrada",
+                    }
+                );
+                survival.notice_elapsed = 2.0;
+                return;
+            }
+        }
+    }
+    
     let target = if remove { hit } else { previous };
     let (chunk_coord, local) = block_address(target);
     let mut mined_block = None;
@@ -4445,6 +4686,10 @@ fn edit_blocks(
             }
             chunk.set(local, AIR);
             mined_block = Some(current_block);
+            // Remove door state if removed
+            if current_block == WOODEN_DOOR {
+                world.door_states.remove(&target);
+            }
         } else {
             if current_block != AIR
                 || inventory.count(selected.0) == 0
@@ -4457,6 +4702,10 @@ fn edit_blocks(
                 return;
             }
             chunk.set(local, selected.0);
+            // Initialize door state if placing a door
+            if selected.0 == WOODEN_DOOR {
+                world.door_states.insert(target, DoorState::Closed);
+            }
         }
     }
     if let Some(block) = mined_block {
@@ -4642,6 +4891,23 @@ fn block_at(world: &WorldData, position: IVec3) -> u8 {
         .chunks
         .get(&chunk_coord)
         .map_or(AIR, |chunk| chunk.get(local))
+}
+
+fn is_block_solid(world: &WorldData, position: IVec3) -> bool {
+    let block = block_at(world, position);
+    match block {
+        AIR => false,
+        WOODEN_DOOR => {
+            // Open doors are not solid for collision
+            let state = world.door_states.get(&position).copied().unwrap_or(DoorState::Closed);
+            !matches!(state, DoorState::Open)
+        }
+        STAIRS | SLAB => {
+            // Stairs and slabs are not fully solid (partial blocks)
+            false
+        }
+        _ => true,
+    }
 }
 
 fn block_address(position: IVec3) -> (IVec3, IVec3) {
@@ -5788,5 +6054,124 @@ mod tests {
         );
         assert_eq!(survival1.hunger, 11.0, "Apple restores 6 hunger");
         assert_eq!(survival2.hunger, 13.0, "Wheat restores 8 hunger");
+    }
+
+    #[test]
+    fn doors_block_player_collision_when_closed_but_allow_passage_when_open() {
+        let mut world = WorldData { seed: 42, ..default() };
+        world
+            .chunks
+            .insert(IVec3::ZERO, generate_chunk(IVec3::ZERO, 42));
+
+        let door_pos = IVec3::new(0, 0, 0);
+        {
+            let chunk = world.chunks.get_mut(&IVec3::ZERO).unwrap();
+            chunk.set(door_pos, WOODEN_DOOR);
+        }
+        world.door_states.insert(door_pos, DoorState::Closed);
+
+        // Closed door should be solid
+        assert!(
+            is_block_solid(&world, door_pos),
+            "Closed door blocks collision"
+        );
+
+        // Open door should not be solid
+        world.door_states.insert(door_pos, DoorState::Open);
+        assert!(
+            !is_block_solid(&world, door_pos),
+            "Open door allows passage"
+        );
+    }
+
+    #[test]
+    fn stairs_and_slabs_do_not_block_collision_but_render() {
+        let mut world = WorldData { seed: 42, ..default() };
+        world
+            .chunks
+            .insert(IVec3::ZERO, generate_chunk(IVec3::ZERO, 42));
+
+        let stair_pos = IVec3::new(1, 0, 0);
+        let slab_pos = IVec3::new(2, 0, 0);
+        {
+            let chunk = world.chunks.get_mut(&IVec3::ZERO).unwrap();
+            chunk.set(stair_pos, STAIRS);
+            chunk.set(slab_pos, SLAB);
+        }
+
+        // Stairs and slabs should not be solid (player can walk through them)
+        assert!(
+            !is_block_solid(&world, stair_pos),
+            "Stairs allow movement"
+        );
+        assert!(!is_block_solid(&world, slab_pos), "Slabs allow movement");
+
+        // But they render in the world (chunk has the blocks)
+        let chunk = world.chunks.get(&IVec3::ZERO).unwrap();
+        assert_eq!(chunk.get(stair_pos), STAIRS);
+        assert_eq!(chunk.get(slab_pos), SLAB);
+    }
+
+    #[test]
+    fn crafting_structures_creates_expected_quantities() {
+        let mut inventory = Inventory::default();
+        let mut survival = Survival::default();
+        let mut tools = CraftedTools::default();
+        inventory.counts[WOOD as usize] = 24;
+        inventory.counts[STONE as usize] = 16;
+
+        // Craft 3 doors (6 wood each)
+        assert!(craft_recipe(
+            CraftRecipe::WoodenDoor,
+            &mut inventory,
+            &mut survival,
+            &mut tools
+        )
+        .is_ok());
+        assert_eq!(inventory.count(WOODEN_DOOR), 3);
+
+        // Craft 4 stairs (6 wood each)
+        inventory.counts[WOOD as usize] = 24;
+        assert!(craft_recipe(
+            CraftRecipe::Stairs,
+            &mut inventory,
+            &mut survival,
+            &mut tools
+        )
+        .is_ok());
+        assert_eq!(inventory.count(STAIRS), 4);
+
+        // Craft 6 slabs (3 wood each)
+        inventory.counts[WOOD as usize] = 18;
+        assert!(craft_recipe(
+            CraftRecipe::Slab,
+            &mut inventory,
+            &mut survival,
+            &mut tools
+        )
+        .is_ok());
+        assert_eq!(inventory.count(SLAB), 6);
+
+        // Craft 4 bricks (4 stone each)
+        inventory.counts[STONE as usize] = 16;
+        assert!(craft_recipe(
+            CraftRecipe::Bricks,
+            &mut inventory,
+            &mut survival,
+            &mut tools
+        )
+        .is_ok());
+        assert_eq!(inventory.count(BRICKS), 4);
+
+        // Craft 4 planks from 1 wood (efficient conversion)
+        inventory.counts[WOOD as usize] = 1;
+        assert!(craft_recipe(
+            CraftRecipe::Planks,
+            &mut inventory,
+            &mut survival,
+            &mut tools
+        )
+        .is_ok());
+        assert_eq!(inventory.count(PLANKS), 4);
     }
 }
