@@ -152,6 +152,7 @@ fn main() {
                     update_hotbar,
                     edit_blocks,
                     toggle_crafting,
+                    toggle_inventory_visibility,
                     craft_recipe_buttons,
                     rebuild_dirty_chunks,
                     autosave_world,
@@ -447,6 +448,43 @@ struct CraftingPanel;
 #[derive(Component)]
 struct CraftingStatus;
 
+#[derive(Component)]
+struct InventoryPanel;
+
+#[derive(Component)]
+struct InventoryGrid;
+
+#[derive(Component, Clone, Copy)]
+struct InventorySlot {
+    block_type: u8,
+    slot_index: usize,
+}
+
+#[derive(Component)]
+struct InventoryCraftingGrid;
+
+#[derive(Component)]
+struct InventoryCraftResult;
+
+#[derive(Component)]
+struct CraftingGridSlot {
+    position: usize,
+}
+
+#[derive(Component)]
+struct HotbarSlotVisual {
+    slot_index: usize,
+}
+
+#[derive(Component)]
+struct SurvivalHeartsDisplay;
+
+#[derive(Component)]
+struct SurvivalHungerDisplay;
+
+#[derive(Component)]
+struct RecipeBookUI;
+
 #[derive(Component, Clone, Copy)]
 struct CraftRecipeButton(CraftRecipe);
 
@@ -464,6 +502,8 @@ enum CraftRecipe {
 struct CraftingUi {
     open: bool,
     just_closed: bool,
+    inventory_open: bool,
+    inventory_just_opened: bool,
 }
 
 #[derive(Resource, Default)]
@@ -662,6 +702,7 @@ fn setup_game_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut mob_assets: ResMut<MobAssets>,
+    inventory: Res<Inventory>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     existing_player: Query<(), With<Player>>,
 ) {
@@ -778,6 +819,7 @@ fn setup_game_scene(
         GameEntity,
     ));
     setup_hud(&mut commands);
+    setup_inventory_ui(&mut commands, &inventory);
 }
 
 fn advance_day_night(time: Res<Time>, mut cycle: ResMut<DayNightCycle>) {
@@ -1523,6 +1565,196 @@ fn cleanup_game_scene(
     pending.is_new_world = false;
     *storage = WorldStorage::default();
     *mob_population = MobPopulation::default();
+}
+
+fn block_type_name(block_type: u8) -> &'static str {
+    match block_type {
+        AIR => "Aire",
+        GRASS => "Hierba",
+        DIRT => "Tierra",
+        STONE => "Piedra",
+        SAND => "Arena",
+        WOOD => "Madera",
+        LEAVES => "Hojas",
+        _ => "Desconocido",
+    }
+}
+
+fn setup_inventory_ui(commands: &mut Commands, inventory: &Inventory) {
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            InventoryPanel,
+            GameEntity,
+        ))
+        .with_children(|panel| {
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(880.0),
+                        height: Val::Px(706.0),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(Val::Px(20.0)),
+                        row_gap: Val::Px(20.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.12, 0.12, 0.12)),
+                    BorderColor(Color::srgb(0.5, 0.5, 0.5)),
+                ))
+                .with_children(|main| {
+                    main.spawn((
+                        Text::new("Inventario (E para cerrar)"),
+                        TextFont::from_font_size(24.0),
+                        TextColor(Color::WHITE),
+                    ));
+
+                    main.spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(200.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(20.0),
+                        ..default()
+                    })
+                    .with_children(|top_row| {
+                        top_row
+                            .spawn((
+                                Node {
+                                    width: Val::Px(180.0),
+                                    height: Val::Percent(100.0),
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(10.0),
+                                    padding: UiRect::all(Val::Px(10.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.15, 0.15, 0.15)),
+                                BorderColor(Color::srgb(0.4, 0.4, 0.4)),
+                                InventoryCraftingGrid,
+                            ))
+                            .with_children(|craft| {
+                                craft.spawn((
+                                    Text::new("Crafteo 2×2"),
+                                    TextFont::from_font_size(14.0),
+                                    TextColor(Color::srgb(0.8, 0.8, 0.8)),
+                                ));
+
+                                craft.spawn(Node {
+                                    width: Val::Percent(100.0),
+                                    height: Val::Px(100.0),
+                                    flex_wrap: FlexWrap::Wrap,
+                                    column_gap: Val::Px(5.0),
+                                    row_gap: Val::Px(5.0),
+                                    ..default()
+                                })
+                                .with_children(|slots| {
+                                    for i in 0..4 {
+                                        slots.spawn((
+                                            Node {
+                                                width: Val::Px(45.0),
+                                                height: Val::Px(45.0),
+                                                border: UiRect::all(Val::Px(1.0)),
+                                                align_items: AlignItems::Center,
+                                                justify_content: JustifyContent::Center,
+                                                ..default()
+                                            },
+                                            BorderColor(Color::srgb(0.4, 0.4, 0.4)),
+                                            BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+                                            CraftingGridSlot { position: i },
+                                        ));
+                                    }
+                                });
+                            });
+
+                        top_row.spawn(Node {
+                            width: Val::Px(40.0),
+                            height: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        })
+                        .with_child((
+                            Text::new("→"),
+                            TextFont::from_font_size(30.0),
+                            TextColor(Color::srgb(0.8, 0.8, 0.8)),
+                        ));
+
+                        top_row
+                            .spawn((
+                                Node {
+                                    width: Val::Px(100.0),
+                                    height: Val::Percent(100.0),
+                                    flex_direction: FlexDirection::Column,
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor(Color::srgb(0.4, 0.4, 0.4)),
+                                BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+                                InventoryCraftResult,
+                            ))
+                            .with_child((
+                                Text::new("Resultado"),
+                                TextFont::from_font_size(12.0),
+                                TextColor(Color::srgb(0.8, 0.8, 0.8)),
+                            ));
+
+                        top_row.spawn(Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        });
+                    });
+
+                    main.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(330.0),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(5.0),
+                            overflow: Overflow::clip_y(),
+                            padding: UiRect::all(Val::Px(10.0)),
+                            border: UiRect::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.08, 0.08, 0.08)),
+                        BorderColor(Color::srgb(0.4, 0.4, 0.4)),
+                        InventoryGrid,
+                    ))
+                    .with_children(|grid| {
+                        for (idx, count) in inventory.counts.iter().enumerate() {
+                            if *count > 0 {
+                                let block_name = block_type_name(idx as u8);
+                                grid.spawn(Node {
+                                    width: Val::Percent(100.0),
+                                    height: Val::Px(40.0),
+                                    flex_direction: FlexDirection::Row,
+                                    align_items: AlignItems::Center,
+                                    padding: UiRect::all(Val::Px(5.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                })
+                                .with_children(|slot| {
+                                    slot.spawn((
+                                        Text::new(format!("{}: {}", block_name, count)),
+                                        TextFont::from_font_size(14.0),
+                                        TextColor(Color::WHITE),
+                                    ));
+                                });
+                            }
+                        }
+                    });
+                });
+        });
 }
 
 fn setup_hud(commands: &mut Commands) {
@@ -2447,6 +2679,45 @@ fn toggle_crafting(
     }
 }
 
+fn toggle_inventory_visibility(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut crafting: ResMut<CraftingUi>,
+    mut panel: Query<&mut Node, With<InventoryPanel>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    // Close inventory on Escape
+    if crafting.inventory_open && keys.just_pressed(KeyCode::Escape) {
+        crafting.inventory_open = false;
+        crafting.inventory_just_opened = true;
+    }
+
+    if !crafting.inventory_just_opened {
+        return;
+    }
+
+    crafting.inventory_just_opened = false;
+
+    let Ok(mut window) = windows.get_single_mut() else {
+        error!("Primary window is missing while toggling inventory");
+        return;
+    };
+
+    let Ok(mut node) = panel.get_single_mut() else {
+        // Inventory panel might not exist yet, so just skip
+        return;
+    };
+
+    if crafting.inventory_open {
+        node.display = Display::Flex;
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
+    } else {
+        node.display = Display::None;
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        window.cursor_options.visible = false;
+    }
+}
+
 fn craft_recipe(
     recipe: CraftRecipe,
     inventory: &mut Inventory,
@@ -3309,17 +3580,31 @@ fn consume_food(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut survival: ResMut<Survival>,
+    mut crafting_ui: ResMut<CraftingUi>,
 ) {
     if !keys.just_pressed(KeyCode::KeyE)
         || !windows
             .get_single()
             .is_ok_and(|window| window.cursor_options.grab_mode == CursorGrabMode::Locked)
-        || survival.food == 0
-        || survival.hunger >= MAX_HUNGER
     {
         return;
     }
-    eat_food(&mut survival);
+
+    // Toggle inventory with E
+    crafting_ui.inventory_open = !crafting_ui.inventory_open;
+    if crafting_ui.inventory_open {
+        crafting_ui.inventory_just_opened = true;
+    }
+
+    // If inventory is now open, don't eat
+    if crafting_ui.inventory_open {
+        return;
+    }
+
+    // Eat only if inventory is closed
+    if survival.food > 0 && survival.hunger < MAX_HUNGER {
+        eat_food(&mut survival);
+    }
 }
 
 fn stream_world_chunks(
