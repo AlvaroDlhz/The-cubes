@@ -87,6 +87,189 @@ const MAX_HOSTILE_MOBS: usize = 3;
 const MOB_SPAWN_INTERVAL: f32 = 4.0;
 const MOB_DESPAWN_DISTANCE: f32 = 40.0;
 
+// ============================================================================
+// MODULE: rendering
+// ============================================================================
+// Handles block visualization, mesh generation, and color mapping
+// Pure functions that don't require mutable state beyond input parameters
+mod rendering {
+    use super::*;
+
+    /// Generate mesh vertex colors based on block type and face direction
+    /// Includes shading for depth perception
+    pub fn block_color(block: u8, face: usize) -> [f32; 4] {
+        let (r, g, b) = match (block, face) {
+            (GRASS, 2) => (0.25, 0.68, 0.24),
+            (GRASS, _) => (0.42, 0.31, 0.18),
+            (DIRT, _) => (0.42, 0.31, 0.18),
+            (STONE, _) => (0.48, 0.50, 0.52),
+            (SAND, _) => (0.82, 0.72, 0.45),
+            (WOOD, 2 | 3) => (0.58, 0.38, 0.18),
+            (WOOD, _) => (0.39, 0.24, 0.11),
+            (LEAVES, _) => (0.19, 0.52, 0.22),
+            _ => (1.0, 0.0, 1.0),
+        };
+        let shade = if face == 3 {
+            0.72
+        } else if face == 0 || face == 1 {
+            0.86
+        } else {
+            1.0
+        };
+        [r * shade, g * shade, b * shade, 1.0]
+    }
+
+    /// Create an empty mesh (used when chunk has no visible faces)
+    pub fn empty_mesh() -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
+        mesh.insert_indices(Indices::U32(Vec::new()));
+        mesh
+    }
+
+    /// Greedy mesh algorithm: merge coplanar block faces into rectangles
+    /// Reduces vertex count and draw calls significantly
+    pub fn greedy_rectangles(mask: &mut [u8], mut emit: impl FnMut(usize, usize, usize, usize, u8)) {
+        let size = CHUNK_SIZE as usize;
+        debug_assert_eq!(mask.len(), size * size);
+
+        for v in 0..size {
+            for u in 0..size {
+                let block = mask[v * size + u];
+                if block == AIR {
+                    continue;
+                }
+
+                let mut width = 1;
+                while u + width < size && mask[v * size + u + width] == block {
+                    width += 1;
+                }
+
+                let mut height = 1;
+                'extend_height: while v + height < size {
+                    for next_u in u..u + width {
+                        if mask[(v + height) * size + next_u] != block {
+                            break 'extend_height;
+                        }
+                    }
+                    height += 1;
+                }
+
+                for next_v in v..v + height {
+                    for next_u in u..u + width {
+                        mask[next_v * size + next_u] = AIR;
+                    }
+                }
+                emit(u, v, width, height, block);
+            }
+        }
+    }
+
+    /// Build complete mesh for a chunk
+    /// Uses greedy algorithm to minimize vertices, applies face culling
+    pub fn build_chunk_mesh(world: &WorldData, coord: IVec3) -> Mesh {
+        let mut positions = Vec::<[f32; 3]>::new();
+        let mut normals = Vec::<[f32; 3]>::new();
+        let mut colors = Vec::<[f32; 4]>::new();
+        let mut indices = Vec::<u32>::new();
+        let Some(chunk) = world.chunks.get(&coord) else {
+            return empty_mesh();
+        };
+
+        for axis in 0..3 {
+            let u_axis = (axis + 1) % 3;
+            let v_axis = (axis + 2) % 3;
+            let mut normal = IVec3::ZERO;
+
+            for positive in [true, false] {
+                normal[axis] = if positive { 1 } else { -1 };
+                let face_index = axis * 2 + if positive { 0 } else { 1 };
+
+                for slice in 0..CHUNK_SIZE {
+                    let mut mask = [AIR; (CHUNK_SIZE * CHUNK_SIZE) as usize];
+                    for v in 0..CHUNK_SIZE {
+                        for u in 0..CHUNK_SIZE {
+                            let mut local = IVec3::ZERO;
+                            local[axis] = slice;
+                            local[u_axis] = u;
+                            local[v_axis] = v;
+
+                            let block = chunk.get(local);
+                            if block == AIR {
+                                continue;
+                            }
+                            let neighbor = coord * CHUNK_SIZE + local + normal;
+                            if super::block_at(world, neighbor) == AIR {
+                                mask[(v * CHUNK_SIZE + u) as usize] = block;
+                            }
+                        }
+                    }
+
+                    greedy_rectangles(&mut mask, |u, v, width, height, block| {
+                        let mut origin = IVec3::ZERO;
+                        origin[axis] = slice + if positive { 1 } else { 0 };
+                        origin[u_axis] = u as i32;
+                        origin[v_axis] = v as i32;
+
+                        let mut u_direction = IVec3::ZERO;
+                        u_direction[u_axis] = width as i32;
+                        let mut v_direction = IVec3::ZERO;
+                        v_direction[v_axis] = height as i32;
+
+                        let origin = origin.as_vec3();
+                        let u_direction = u_direction.as_vec3();
+                        let v_direction = v_direction.as_vec3();
+                        let corners = if positive {
+                            [
+                                origin,
+                                origin + u_direction,
+                                origin + u_direction + v_direction,
+                                origin + v_direction,
+                            ]
+                        } else {
+                            [
+                                origin,
+                                origin + v_direction,
+                                origin + u_direction + v_direction,
+                                origin + u_direction,
+                            ]
+                        };
+                        let base = positions.len() as u32;
+                        for corner in corners {
+                            positions.push(corner.to_array());
+                            normals.push(normal.as_vec3().to_array());
+                            colors.push(block_color(block, face_index));
+                        }
+                        indices.extend_from_slice(&[
+                            base,
+                            base + 1,
+                            base + 2,
+                            base,
+                            base + 2,
+                            base + 3,
+                        ]);
+                    });
+                }
+            }
+        }
+
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+        mesh.insert_indices(Indices::U32(indices));
+        mesh
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -2797,7 +2980,7 @@ fn loading_world_step(
                     next.set(AppState::MainMenu);
                     return;
                 };
-                let mesh = meshes.add(build_chunk_mesh(&world, coord));
+                let mesh = meshes.add(rendering::build_chunk_mesh(&world, coord));
                 commands.spawn((
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
@@ -4088,7 +4271,7 @@ fn stream_world_chunks(
         world.chunks.remove(&coord);
         return;
     };
-    let mesh = meshes.add(build_chunk_mesh(&world, coord));
+    let mesh = meshes.add(rendering::build_chunk_mesh(&world, coord));
     commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
@@ -4873,7 +5056,7 @@ fn rebuild_dirty_chunks(
                 error!("Missing mesh asset for chunk {:?}", chunk.0);
                 continue;
             };
-            *mesh = build_chunk_mesh(&world, chunk.0);
+            *mesh = rendering::build_chunk_mesh(&world, chunk.0);
         }
     }
 }
@@ -5101,173 +5284,6 @@ fn lerp(start: f32, end: f32, amount: f32) -> f32 {
     start + (end - start) * amount
 }
 
-fn greedy_rectangles(mask: &mut [u8], mut emit: impl FnMut(usize, usize, usize, usize, u8)) {
-    let size = CHUNK_SIZE as usize;
-    debug_assert_eq!(mask.len(), size * size);
-
-    for v in 0..size {
-        for u in 0..size {
-            let block = mask[v * size + u];
-            if block == AIR {
-                continue;
-            }
-
-            let mut width = 1;
-            while u + width < size && mask[v * size + u + width] == block {
-                width += 1;
-            }
-
-            let mut height = 1;
-            'extend_height: while v + height < size {
-                for next_u in u..u + width {
-                    if mask[(v + height) * size + next_u] != block {
-                        break 'extend_height;
-                    }
-                }
-                height += 1;
-            }
-
-            for next_v in v..v + height {
-                for next_u in u..u + width {
-                    mask[next_v * size + next_u] = AIR;
-                }
-            }
-            emit(u, v, width, height, block);
-        }
-    }
-}
-
-fn build_chunk_mesh(world: &WorldData, coord: IVec3) -> Mesh {
-    let mut positions = Vec::<[f32; 3]>::new();
-    let mut normals = Vec::<[f32; 3]>::new();
-    let mut colors = Vec::<[f32; 4]>::new();
-    let mut indices = Vec::<u32>::new();
-    let Some(chunk) = world.chunks.get(&coord) else {
-        return empty_mesh();
-    };
-
-    for axis in 0..3 {
-        let u_axis = (axis + 1) % 3;
-        let v_axis = (axis + 2) % 3;
-        let mut normal = IVec3::ZERO;
-
-        for positive in [true, false] {
-            normal[axis] = if positive { 1 } else { -1 };
-            let face_index = axis * 2 + if positive { 0 } else { 1 };
-
-            for slice in 0..CHUNK_SIZE {
-                let mut mask = [AIR; (CHUNK_SIZE * CHUNK_SIZE) as usize];
-                for v in 0..CHUNK_SIZE {
-                    for u in 0..CHUNK_SIZE {
-                        let mut local = IVec3::ZERO;
-                        local[axis] = slice;
-                        local[u_axis] = u;
-                        local[v_axis] = v;
-
-                        let block = chunk.get(local);
-                        if block == AIR {
-                            continue;
-                        }
-                        let neighbor = coord * CHUNK_SIZE + local + normal;
-                        if block_at(world, neighbor) == AIR {
-                            mask[(v * CHUNK_SIZE + u) as usize] = block;
-                        }
-                    }
-                }
-
-                greedy_rectangles(&mut mask, |u, v, width, height, block| {
-                    let mut origin = IVec3::ZERO;
-                    origin[axis] = slice + if positive { 1 } else { 0 };
-                    origin[u_axis] = u as i32;
-                    origin[v_axis] = v as i32;
-
-                    let mut u_direction = IVec3::ZERO;
-                    u_direction[u_axis] = width as i32;
-                    let mut v_direction = IVec3::ZERO;
-                    v_direction[v_axis] = height as i32;
-
-                    let origin = origin.as_vec3();
-                    let u_direction = u_direction.as_vec3();
-                    let v_direction = v_direction.as_vec3();
-                    let corners = if positive {
-                        [
-                            origin,
-                            origin + u_direction,
-                            origin + u_direction + v_direction,
-                            origin + v_direction,
-                        ]
-                    } else {
-                        [
-                            origin,
-                            origin + v_direction,
-                            origin + u_direction + v_direction,
-                            origin + u_direction,
-                        ]
-                    };
-                    let base = positions.len() as u32;
-                    for corner in corners {
-                        positions.push(corner.to_array());
-                        normals.push(normal.as_vec3().to_array());
-                        colors.push(block_color(block, face_index));
-                    }
-                    indices.extend_from_slice(&[
-                        base,
-                        base + 1,
-                        base + 2,
-                        base,
-                        base + 2,
-                        base + 3,
-                    ]);
-                });
-            }
-        }
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-fn empty_mesh() -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    mesh.insert_indices(Indices::U32(Vec::new()));
-    mesh
-}
-
-fn block_color(block: u8, face: usize) -> [f32; 4] {
-    let (r, g, b) = match (block, face) {
-        (GRASS, 2) => (0.25, 0.68, 0.24),
-        (GRASS, _) => (0.42, 0.31, 0.18),
-        (DIRT, _) => (0.42, 0.31, 0.18),
-        (STONE, _) => (0.48, 0.50, 0.52),
-        (SAND, _) => (0.82, 0.72, 0.45),
-        (WOOD, 2 | 3) => (0.58, 0.38, 0.18),
-        (WOOD, _) => (0.39, 0.24, 0.11),
-        (LEAVES, _) => (0.19, 0.52, 0.22),
-        _ => (1.0, 0.0, 1.0),
-    };
-    let shade = if face == 3 {
-        0.72
-    } else if face == 0 || face == 1 {
-        0.86
-    } else {
-        1.0
-    };
-    [r * shade, g * shade, b * shade, 1.0]
-}
-
 fn player_rotation(yaw: f32, pitch: f32) -> Quat {
     Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)
 }
@@ -5414,7 +5430,7 @@ mod tests {
         let mut mask = vec![GRASS; size * size];
         let mut rectangles = Vec::new();
 
-        greedy_rectangles(&mut mask, |u, v, width, height, block| {
+        rendering::greedy_rectangles(&mut mask, |u, v, width, height, block| {
             rectangles.push((u, v, width, height, block));
         });
 
@@ -5435,7 +5451,7 @@ mod tests {
         mask[size + 2] = DIRT;
         let mut rectangles = Vec::new();
 
-        greedy_rectangles(&mut mask, |u, v, width, height, block| {
+        rendering::greedy_rectangles(&mut mask, |u, v, width, height, block| {
             rectangles.push((u, v, width, height, block));
         });
 
