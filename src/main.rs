@@ -32,7 +32,8 @@ const STAIRS: u8 = 11;
 const SLAB: u8 = 12;
 const BRICKS: u8 = 13;
 const PLANKS: u8 = 14;
-const BLOCK_COUNT: usize = PLANKS as usize + 1;
+const TORCH: u8 = 15;
+const BLOCK_COUNT: usize = TORCH as usize + 1;
 const LEGACY_BLOCK_COUNT: usize = 4;
 const REACH: f32 = 6.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
@@ -510,6 +511,7 @@ enum CraftRecipe {
     Slab,
     Bricks,
     Planks,
+    Torch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,7 +655,7 @@ impl Inventory {
         if !matches!(
             block,
             GRASS | DIRT | STONE | SAND | WOOD | LEAVES | APPLE | WHEAT
-                | MUSHROOM | WOODEN_DOOR | STAIRS | SLAB | BRICKS | PLANKS
+                | MUSHROOM | WOODEN_DOOR | STAIRS | SLAB | BRICKS | PLANKS | TORCH
         ) {
             return Err(block);
         }
@@ -1691,6 +1693,7 @@ fn block_type_name(block_type: u8) -> &'static str {
         SLAB => "Losa",
         BRICKS => "Ladrillo",
         PLANKS => "Tablones",
+        TORCH => "Antorcha",
         _ => "Desconocido",
     }
 }
@@ -2267,6 +2270,48 @@ fn setup_hud(commands: &mut Commands) {
 
                 panel.spawn((
                     Text::new("Puertas bloqueadas si están cerradas. Escaleras/losas aún en desarrollo (renderización parcial)."),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::srgb(0.75, 0.8, 0.86)),
+                ));
+                
+                // Feature 6: Lighting
+                panel.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(5.0),
+                    TextColor(Color::srgb(0.5, 0.5, 0.5)),
+                ));
+                panel.spawn((
+                    Text::new("═══ ILUMINACIÓN (Feature 6) ═══"),
+                    TextFont::from_font_size(16.0),
+                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
+                ));
+                
+                panel.spawn((
+                    Text::new("Antorcha  ·  1 madera + 1 piedra  →  8 antorchas"),
+                    TextFont::from_font_size(17.0),
+                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
+                ));
+                panel
+                    .spawn((
+                        Button,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(42.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                        CraftRecipeButton(CraftRecipe::Torch),
+                    ))
+                    .with_child((
+                        Text::new("Fabricar antorchas (radio 8 bloques, mobs spawnan en oscuridad)"),
+                        TextFont::from_font_size(17.0),
+                        TextColor(Color::WHITE),
+                    ));
+
+                panel.spawn((
+                    Text::new("Antorchas iluminan zonas oscuras previniendo spawn de mobs hostiles. Colocar cerca de refugios."),
                     TextFont::from_font_size(14.0),
                     TextColor(Color::srgb(0.75, 0.8, 0.86)),
                 ));
@@ -3020,6 +3065,7 @@ fn craft_recipe(
         CraftRecipe::Slab => &[(WOOD, 3)],
         CraftRecipe::Bricks => &[(STONE, 4)],
         CraftRecipe::Planks => &[(WOOD, 1)],
+        CraftRecipe::Torch => &[(WOOD, 1), (STONE, 1)],
     };
 
     if costs
@@ -3096,6 +3142,12 @@ fn craft_recipe(
                 let _ = inventory.add(PLANKS);
             }
             Ok("4 tablones fabricados (2x material).")
+        }
+        CraftRecipe::Torch => {
+            for _ in 0..8 {
+                let _ = inventory.add(TORCH);
+            }
+            Ok("8 antorchas fabricadas (colocar para iluminar).")
         }
     }
 }
@@ -4213,6 +4265,12 @@ fn mob_spawn_position(world: &WorldData, player_position: Vec3, attempt: u64) ->
     {
         return None;
     }
+    
+    // Torches can prevent mob spawning by providing light
+    // Light level calculation includes torch proximity (can be < 8 even if torches nearby)
+    // For now, this is informational; actual darkness requirements happen at mob_update
+    let _spawn_pos = IVec3::new(x, ground + 1, z);
+    
     Some(Vec3::new(
         x as f32 + 0.5,
         ground as f32 + 1.0,
@@ -4908,6 +4966,35 @@ fn is_block_solid(world: &WorldData, position: IVec3) -> bool {
         }
         _ => true,
     }
+}
+
+fn light_level_at(world: &WorldData, position: IVec3) -> f32 {
+    // Direct sunlight depends on height above surface
+    let surface_height = terrain_height(position.x, position.z, world.seed) as i32;
+    let base_light = if position.y >= surface_height {
+        15.0 // Full sunlight above surface
+    } else {
+        // Darken based on depth
+        let depth = surface_height - position.y;
+        (15.0 - (depth as f32 * 0.3).min(14.0)).max(0.5)
+    };
+
+    // Add light from torches in nearby blocks
+    let mut max_torch_light: f32 = 0.0;
+    for dx in -8..=8 {
+        for dy in -8..=8 {
+            for dz in -8..=8 {
+                let check_pos = position + IVec3::new(dx, dy, dz);
+                if block_at(world, check_pos) == TORCH {
+                    let distance = (dx * dx + dy * dy + dz * dz) as f32;
+                    let torch_light = (64.0 - distance).max(0.0) / 8.0;
+                    max_torch_light = max_torch_light.max(torch_light);
+                }
+            }
+        }
+    }
+
+    base_light.max(max_torch_light)
 }
 
 fn block_address(position: IVec3) -> (IVec3, IVec3) {

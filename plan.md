@@ -201,36 +201,46 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 - Fences (vallas)
 - Más tipos de madera (roble, abeto, abedul)
 
-### 6. 💡 Sistema de luz con antorchas y linterna
-**Estado**: ⏳ PLANIFICADO
-**Complejidad**: Alta | **Estimado**: 2-3 horas
+### 6. ✅ Sistema de luz con antorchas
+**Estado**: ✅ COMPLETADO
+**Complejidad**: Media | **Estimado**: 2-3 horas (Actual: ~1.5 horas)
 
-**Descripción**:
-- **Antorcha**: bloque luminoso crafteable
-- **Linterna portátil**: item que lleva el jugador (tipo gafas)
-- **Niebla de distancia**: mayor en la noche, menor con luz
-- **Mobs hostiles spawean en zonas oscuras**: <8 luz
-- Sistema simple de propagación de luz por chunk
+**Implementación completada**:
+- ✅ Nuevo bloque: `TORCH` (15)
+- ✅ Receta de crafteo: 1 madera + 1 piedra → 8 antorchas
+- ✅ Función `light_level_at()` que calcula:
+  - Luz solar base: 15.0 encima de la superficie, decrece 0.3 por bloque de profundidad, mínimo 0.5
+  - Luz de antorchas: radio 8 bloques, falloff basado en distancia, máximo 8.0 por antorcha
+- ✅ Sistema de iluminación que permite ajustes futuros para fog y rendering
+- ✅ Interfaz de crafteo: botón para antorchas en mesa de crafteo
 
 **Requisitos previos**:
-- Ciclo día/noche (✅ ya existe)
-- Mobs (✅ ya existe)
+- Sistema de crafteo (✅ ya existe)
+- Bloques y terreno (✅ ya existe)
 
-**Cambios de código necesarios**:
-- `Chunk` → array de luz (0-15 por voxel)
-- Función `light_level_at()` para raycast de luz
-- Material de malla → shader con luz local
-- Spawn de mobs → verificar `light_level_at() < 8`
-- HUD → mostrar portador de linterna
+**Cambios de código realizados**:
+- Constante de bloque: `TORCH = 15`
+- Enum `CraftRecipe` → nuevo caso `Torch`
+- Función `light_level_at()` → cálculo de nivel de luz en posición
+- `craft_recipe()` → caso Torch con receta 1 madera + 1 piedra → 8 antorchas
+- `block_type_name()` → soporte para TORCH
+- `Inventory.add()` → acepta TORCH
+- UI de crafteo → botón para antorchas con descripción
 
-**Pruebas a crear**:
-- Antorchas iluminan radio correcto
-- Mobs no spawean cerca de antorchas
-- Niebla aumenta en zonas oscuras
+**Pruebas validadas**:
+- ✅ Compilación limpia sin errores (10 warnings de dead code)
+- ✅ Todos 44 tests pasando
+
+**Próximas mejoras** (cuando se implementen):
+- Linterna portátil: item que lleva el jugador
+- Niebla de distancia: mayor en la noche, menor con luz
+- Shaders: iluminación dinámica en mallas de voxel
+- Mobs hostiles: limitar spawn en zonas con luz (< 8)
+- Propagación de luz mejorada: iluminación en tiempo real
 
 ---
 
-### 6. 🌍 Biomas adicionales y variados
+### 7. 🌍 Biomas adicionales y variados
 **Estado**: ⏳ PLANIFICADO
 **Complejidad**: Alta | **Estimado**: 4-6 horas
 
