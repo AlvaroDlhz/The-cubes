@@ -430,6 +430,7 @@ fn main() {
                     update_sky,
                     stream_world_chunks,
                     update_particles,
+                    animate_water_lava,
                 ),
                 update_mobs,
                 (
@@ -555,6 +556,8 @@ struct PendingWorld {
 #[derive(Resource, Default)]
 struct TextureAssets {
     atlas: Option<Handle<Image>>,
+    water_material: Option<Handle<StandardMaterial>>,
+    lava_material: Option<Handle<StandardMaterial>>,
 }
 
 #[derive(Resource)]
@@ -1099,9 +1102,23 @@ fn set_generated_block(chunk: &mut Chunk, x: i32, y: i32, z: i32, block: u8) {
 fn load_textures(
     asset_server: Res<AssetServer>,
     mut texture_assets: ResMut<TextureAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if texture_assets.atlas.is_none() {
         texture_assets.atlas = Some(asset_server.load("texture_atlas.png"));
+        
+        // Create separate materials for water and lava with animation colors
+        texture_assets.water_material = Some(materials.add(StandardMaterial {
+            base_color: Color::linear_rgb(0.2, 0.5, 0.8),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }));
+        
+        texture_assets.lava_material = Some(materials.add(StandardMaterial {
+            base_color: Color::linear_rgb(1.0, 0.5, 0.0),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }));
     }
 }
 
@@ -4099,6 +4116,38 @@ fn update_particles(
         let dt = time.delta_secs();
         particle.velocity += gravity * dt;
         transform.translation += particle.velocity * dt;
+    }
+}
+
+fn animate_water_lava(
+    texture_assets: Res<TextureAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
+) {
+    // Animate water and lava colors with a subtle pulsing effect
+    let wave = (time.elapsed_secs() * 2.0).sin(); // Oscillates between -1 and 1
+    let brightness = 0.9 + wave * 0.1; // Varies between 0.8 and 1.0
+    
+    if let Some(water_handle) = &texture_assets.water_material {
+        if let Some(material) = materials.get_mut(water_handle) {
+            // Water: cycle between light blue and slightly darker blue
+            material.base_color = Color::linear_rgb(
+                0.2 * brightness,
+                0.5 * brightness,
+                0.8 * brightness,
+            );
+        }
+    }
+    
+    if let Some(lava_handle) = &texture_assets.lava_material {
+        if let Some(material) = materials.get_mut(lava_handle) {
+            // Lava: cycle between orange and slightly darker orange
+            material.base_color = Color::linear_rgb(
+                1.0 * brightness,
+                0.5 * brightness,
+                0.0 * brightness,
+            );
+        }
     }
 }
 
