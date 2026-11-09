@@ -4396,6 +4396,7 @@ fn stream_world_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     chunk_entities: Query<(Entity, &ChunkMesh)>,
+    texture_assets: Res<TextureAssets>,
 ) {
     let Ok(player) = player.get_single() else {
         return;
@@ -4479,7 +4480,7 @@ fn stream_world_chunks(
 
     if loading.material.is_none() {
         loading.material = Some(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
+            base_color_texture: texture_assets.atlas.clone(),
             ..default()
         }));
     }
