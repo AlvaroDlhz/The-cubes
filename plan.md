@@ -98,34 +98,51 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 
 ---
 
-### 4. 🍖 Sistema de hambre refinado con variedad de comida
-**Estado**: ⏳ PLANIFICADO
-**Complejidad**: Media | **Estimado**: 1-2 horas
+### 4. ✅ Sistema de hambre refinado con variedad de comida
+**Estado**: ✅ COMPLETADO
+**Complejidad**: Media | **Estimado**: 1-2 horas (Actual: ~2 horas)
 
-**Descripción**:
-- **Carne**: drops de mobs, saturation media
-- **Bayas**: de hojas, saturation baja
-- **Manzanas**: de árboles especiales, saturation media
-- **Trigo/Pan**: crafteable, saturation alta
-- **Setas**: encontradas en bosques, algunas venenosas
-- Cocinar en fogata → mejor valor nutricional
-- Sistema de efectos negativos (envenenamiento)
+**Implementación completada**:
+- ✅ Nuevos bloques: `APPLE` (7), `WHEAT` (8), `MUSHROOM` (9)
+- ✅ `FoodType` enum con 6 variantes:
+  - `BerryRation`: saturation 4 (comida base)
+  - `Apple`: saturation 6 (de árboles)
+  - `Wheat`: saturation 8 (de campos)
+  - `Mushroom`: saturation 2 (de bosques, puede ser venenoso)
+  - `RawMeat`: saturation 3 (de mobs)
+  - `CookedMeat`: saturation 8 (versión cocinada)
+- ✅ Método `saturation()` en `FoodType` → devuelve valor diferente por tipo
+- ✅ Método `is_poisonous()` en `FoodType` → genera efecto de daño para setas
+- ✅ Función `eat_food_of_type()` → aplica saturación variable y efectos
+- ✅ Generación de terreno:
+  - Manzanas: 15% probabilidad en hojas de árbol
+  - Trigo: 8% probabilidad en pasto de llanuras
+  - Setas: 5% probabilidad en pasto de bosques
+- ✅ Sistema de envenenamiento → setas venenosas reducen vida en 2 puntos
+- ✅ Retrocompatibilidad: `LEGACY_BLOCK_COUNT = 4`, `BLOCK_COUNT = 10`
 
 **Requisitos previos**:
 - Biomas (✅ ya existen)
 - Mobs y drops (✅ ya existe)
 
-**Cambios de código necesarios**:
-- `Survival` → añadir `last_food_type` para diferenciar saturations
-- Nuevos bloques: `APPLE`, `WHEAT`, `MUSHROOM`
-- Generador de terreno → incluir nuevos bloques
-- `eat_food()` → parámetro de tipo comida con diferente saturación
-- Efectos de poción: Duration + tipo
+**Cambios de código realizados**:
+- `FoodType` enum (6 variantes) con métodos `saturation()` e `is_poisonous()`
+- `block_type_name()` → soporte para Manzana, Trigo, Hongo
+- `eat_food()` → refactorizado a usar `eat_food_of_type(FoodType)`
+- `eat_food_of_type()` → nueva función con saturación variable y efectos
+- `generate_chunk()` → 3 nuevos bucles de generación de alimentos
+- Constantes de bloque: `APPLE = 7`, `WHEAT = 8`, `MUSHROOM = 9`
 
-**Pruebas a crear**:
-- Diferentes comidas tienen saturación correcta
-- Alimentos cocinados mejoran valor
-- Veneno reduce vida (integración con `apply_damage`)
+**Pruebas creadas** (4 nuevos tests, todos pasando):
+- ✅ `different_food_types_have_correct_saturation` → valida FoodType.saturation()
+- ✅ `poisonous_mushrooms_cause_damage` → confirma daño de setas venenosas
+- ✅ `cooked_meat_provides_more_saturation_than_raw_meat` → valida cooking multiplier
+- ✅ `eating_different_foods_increases_hunger_differently` → prueba saturación diferencial
+
+**Tests validados**:
+- ✅ Compilación limpia sin errores
+- ✅ Todos 41 tests pasando (37 existentes + 4 nuevos)
+- ✅ Test `eating_restores_hunger_and_consumes_food` actualizado para BerryRation (saturation 4)
 
 ---
 

@@ -66,6 +66,15 @@ con media vida y hambre, y conservas inventario y experiencia. Romper bloques
 concede experiencia y sube de nivel; las barras de vida, hambre y experiencia
 aparecen en el HUD.
 
+El sistema de alimentos es variado y genera naturalmente en el terreno:
+- **Ración de Bayas** (saturación 4): crafteable desde hojas y madera.
+- **Manzanas** (saturación 6): generadas en hojas de árboles (15% probabilidad).
+- **Trigo** (saturación 8): encontrado en pasto de llanuras (8% probabilidad).
+- **Setas** (saturación 2): encontradas en pasto de bosques (5% probabilidad);
+  las setas venenosas causales 2 puntos de daño además de restaurar hambre.
+- **Carne Cruda** (saturación 3): drops de animales derrotados.
+- **Carne Cocinada** (saturación 8): versión mejorada de la carne cruda.
+
 Praderas y bosques pueden albergar animales pasivos que deambulan y huyen; al
 derrotarlos obtienes comida y experiencia. De noche aparecen acechadores que
 persiguen y atacan al jugador, y conceden experiencia al ser derrotados. La

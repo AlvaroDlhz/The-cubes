@@ -24,7 +24,10 @@ const STONE: u8 = 3;
 const SAND: u8 = 4;
 const WOOD: u8 = 5;
 const LEAVES: u8 = 6;
-const BLOCK_COUNT: usize = LEAVES as usize + 1;
+const APPLE: u8 = 7;
+const WHEAT: u8 = 8;
+const MUSHROOM: u8 = 9;
+const BLOCK_COUNT: usize = MUSHROOM as usize + 1;
 const LEGACY_BLOCK_COUNT: usize = 4;
 const REACH: f32 = 6.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
@@ -498,6 +501,33 @@ enum CraftRecipe {
     Arrows,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoodType {
+    BerryRation,   // saturation: 4
+    Apple,         // saturation: 6
+    Mushroom,      // saturation: 2 (puede ser venenoso)
+    Wheat,         // saturation: 8
+    RawMeat,       // saturation: 3
+    CookedMeat,    // saturation: 8
+}
+
+impl FoodType {
+    fn saturation(&self) -> f32 {
+        match self {
+            FoodType::BerryRation => 4.0,
+            FoodType::Apple => 6.0,
+            FoodType::Mushroom => 2.0,
+            FoodType::Wheat => 8.0,
+            FoodType::RawMeat => 3.0,
+            FoodType::CookedMeat => 8.0,
+        }
+    }
+
+    fn is_poisonous(&self) -> bool {
+        matches!(self, FoodType::Mushroom)
+    }
+}
+
 #[derive(Resource, Default)]
 struct CraftingUi {
     open: bool,
@@ -679,9 +709,49 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                             let local = IVec3::new(local_x, leaf_y, local_z);
                             if chunk.get(local) == AIR {
                                 chunk.set(local, LEAVES);
+                                // Occasionally spawn apples in leaves
+                                if coordinate_hash(world_x ^ leaf_x as i32, leaf_y as i32, seed ^ 0x5C0F) % 100 < 15 {
+                                    chunk.set(local, APPLE);
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Generate mushrooms in forests
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Forest {
+                continue;
+            }
+            let height = terrain_height(world_x, world_z, seed);
+            if coordinate_hash(world_x, world_z, seed ^ 0xDEAD_BEEF) % 100 < 5 {
+                let mushroom_y = height + 1;
+                if (0..CHUNK_SIZE).contains(&mushroom_y) {
+                    chunk.set(IVec3::new(x, mushroom_y, z), MUSHROOM);
+                }
+            }
+        }
+    }
+
+    // Generate wheat in grassland
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            if biome_at(world_x, world_z, seed) != Biome::Plains {
+                continue;
+            }
+            let height = terrain_height(world_x, world_z, seed);
+            if coordinate_hash(world_x, world_z, seed ^ 0xBEEF_FACE) % 100 < 8 {
+                let wheat_y = height + 1;
+                if (0..CHUNK_SIZE).contains(&wheat_y) {
+                    chunk.set(IVec3::new(x, wheat_y, z), WHEAT);
                 }
             }
         }
@@ -1576,6 +1646,9 @@ fn block_type_name(block_type: u8) -> &'static str {
         SAND => "Arena",
         WOOD => "Madera",
         LEAVES => "Hojas",
+        APPLE => "Manzana",
+        WHEAT => "Trigo",
+        MUSHROOM => "Hongo",
         _ => "Desconocido",
     }
 }
@@ -3058,13 +3131,34 @@ fn fall_damage(impact_speed: f32) -> f32 {
 }
 
 fn eat_food(survival: &mut Survival) -> bool {
+    eat_food_of_type(survival, FoodType::BerryRation)
+}
+
+fn eat_food_of_type(survival: &mut Survival, food_type: FoodType) -> bool {
     if survival.food == 0 || survival.hunger >= MAX_HUNGER {
         return false;
     }
+
     survival.food -= 1;
-    survival.hunger = (survival.hunger + 6.0).min(MAX_HUNGER);
-    survival.notice = "Comiste una ración.".into();
+    let saturation = food_type.saturation();
+    survival.hunger = (survival.hunger + saturation).min(MAX_HUNGER);
+
+    let food_name = match food_type {
+        FoodType::BerryRation => "Comiste una ración de bayas.",
+        FoodType::Apple => "Comiste una manzana.",
+        FoodType::Mushroom => "Comiste un hongo.",
+        FoodType::Wheat => "Comiste trigo.",
+        FoodType::RawMeat => "Comiste carne cruda.",
+        FoodType::CookedMeat => "Comiste carne asada.",
+    };
+
+    survival.notice = food_name.into();
     survival.notice_elapsed = 3.0;
+
+    if food_type.is_poisonous() {
+        apply_damage(survival, 2.0, "Envenenamiento");
+    }
+
     true
 }
 
@@ -5047,7 +5141,7 @@ mod tests {
     #[test]
     fn eating_restores_hunger_and_consumes_food() {
         let mut survival = Survival {
-            hunger: 15.0,
+            hunger: 16.0,  // Changed from 15 to 16, so 16 + 4 = 20 = MAX_HUNGER
             food: 2,
             ..default()
         };
@@ -5058,7 +5152,7 @@ mod tests {
         assert!(!eat_food(&mut survival));
         survival.hunger = 0.0;
         assert!(eat_food(&mut survival));
-        assert_eq!(survival.hunger, 6.0);
+        assert_eq!(survival.hunger, 4.0);  // BerryRation provides 4 saturation, not 6
     }
 
     #[test]
@@ -5624,5 +5718,75 @@ mod tests {
             blocks: vec![AIR; CHUNK_VOLUME - 1],
         });
         assert!(validate_world_save(&save).is_err());
+    }
+
+    #[test]
+    fn different_food_types_have_correct_saturation() {
+        let saturations = [
+            (FoodType::BerryRation, 4.0),
+            (FoodType::Apple, 6.0),
+            (FoodType::Mushroom, 2.0),
+            (FoodType::Wheat, 8.0),
+            (FoodType::RawMeat, 3.0),
+            (FoodType::CookedMeat, 8.0),
+        ];
+
+        for (food_type, expected_saturation) in saturations {
+            assert_eq!(
+                food_type.saturation(),
+                expected_saturation,
+                "Food {:?} should have saturation {:?}",
+                food_type,
+                expected_saturation
+            );
+        }
+    }
+
+    #[test]
+    fn poisonous_mushrooms_cause_damage() {
+        let mut survival = Survival::default();
+        survival.food = 5;
+        survival.hunger = 5.0;
+        let initial_health = survival.health;
+
+        eat_food_of_type(&mut survival, FoodType::Mushroom);
+
+        assert_eq!(survival.food, 4, "Food should be consumed");
+        assert!(
+            survival.hunger > 5.0,
+            "Hunger should increase even when poisoned"
+        );
+        assert!(
+            survival.health < initial_health,
+            "Poisonous mushroom should cause damage"
+        );
+    }
+
+    #[test]
+    fn cooked_meat_provides_more_saturation_than_raw_meat() {
+        assert!(FoodType::CookedMeat.saturation() > FoodType::RawMeat.saturation());
+        assert_eq!(FoodType::CookedMeat.saturation(), 8.0);
+        assert_eq!(FoodType::RawMeat.saturation(), 3.0);
+    }
+
+    #[test]
+    fn eating_different_foods_increases_hunger_differently() {
+        let mut survival1 = Survival::default();
+        survival1.food = 10;
+        survival1.hunger = 5.0;
+
+        let mut survival2 = Survival::default();
+        survival2.food = 10;
+        survival2.hunger = 5.0;
+
+        eat_food_of_type(&mut survival1, FoodType::Apple);
+        eat_food_of_type(&mut survival2, FoodType::Wheat);
+
+        assert!(
+            survival2.hunger > survival1.hunger,
+            "Wheat should restore more hunger than apple"
+        );
+        assert_eq!(survival1.hunger, 11.0, "Apple restores 6 hunger");
+        assert_eq!(survival2.hunger, 13.0, "Wheat restores 8 hunger");
     }
 }
