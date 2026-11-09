@@ -47,7 +47,8 @@ guardado; si hay un error se informa y se reintenta.
   del bloque.
 - Clic derecho: colocar una unidad del bloque seleccionado.
 - `1`–`6` o rueda del ratón: seleccionar uno de los seis espacios de la barra.
-- `E`: consumir comida y recuperar hambre.
+- `E`: abrir/cerrar el inventario (estilo Minecraft); también consume comida si el inventario está cerrado.
+- `Esc` en el inventario: cerrar el inventario.
 - `C`: abrir/cerrar la mesa de crafteo; `Esc` también la cierra.
 
 La interfaz muestra una mira, el modo de movimiento, el bloque activo y una
@@ -79,6 +80,12 @@ tienen 64 usos y dan materiales y experiencia adicionales al romper sus bloques
 correspondientes. La pala es 2x más eficiente en arena y tierra, y la espada
 golpea con 2 puntos de daño en lugar de 1 sin romper bloques. Las recetas y la
 durabilidad se conservan al guardar el mundo.
+
+El inventario (tecla `E`) muestra el contenido completo del jugador en una
+interfaz tipo Minecraft: panel central de 880×706px con área de crafteo 2×2 en
+la esquina superior izquierda (con visualización del resultado), y un grid de
+inventario mostrando todos los bloques del jugador con sus cantidades. El panel
+se abre y cierra con `E` o `Esc`, y al abrirlo se libera el ratón para interactuar.
 
 El ciclo día/noche dura 24 minutos reales: cada minuto real equivale a una hora
 del juego. La iluminación cambia suavemente durante el amanecer, el día, el

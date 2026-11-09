@@ -53,7 +53,52 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 
 ---
 
-### 3. 🍖 Sistema de hambre refinado con variedad de comida
+### 3. 🎮 Interfaz de usuario tipo Minecraft (Inventario mejorado)
+**Estado**: ✅ COMPLETADO
+**Complejidad**: Media | **Estimado**: 2-3 horas (Actual: ~1 hora)
+
+**Implementación completada**:
+- ✅ Panel de inventario completo estilo Minecraft (880×706px)
+- ✅ Área de crafteo 2×2 con visualización de resultado
+- ✅ Grid de inventario mostrando todos los bloques con cantidades
+- ✅ Abre/cierra con tecla E (compatible con comer)
+- ✅ Se cierra con ESC
+- ✅ Cursor visible cuando inventario está abierto
+- ✅ Estilo visual oscuro similar a Minecraft
+- ✅ Toda la functionality anterior se mantiene (retrocompatibilidad 100%)
+
+**Requisitos previos**:
+- Sistema de UI Bevy (✅ ya existe)
+- Inventario (✅ ya existe)
+- Sistema de crafteo (✅ ya existe)
+
+**Cambios de código realizados**:
+- Componentes UI nuevos: `InventoryPanel`, `InventoryCraftingGrid`, `InventoryGrid`, `CraftingGridSlot`, `InventoryCraftResult`
+- `CraftingUi` resource → agregados `inventory_open`, `inventory_just_opened` flags
+- `consume_food()` → modificado para alternar inventario con E
+- Nueva función `toggle_inventory_visibility()` → sistema que maneja visibilidad
+- Nueva función `block_type_name()` → helper para convertir ID de bloque a nombre
+- `setup_inventory_ui()` → constructor completo del panel
+- `setup_game_scene()` → integración de setup_inventory_ui
+
+**Pruebas validadas**:
+- ✅ Todos 37 tests existentes pasan
+- ✅ Compilación limpia sin errores
+- ✅ E key abre/cierra inventario correctamente
+- ✅ Inventario muestra bloques y cantidades
+- ✅ UI renderiza correctamente en pantalla
+- ✅ Cursor grab/release funciona
+
+**Próximas mejoras** (cuando se implemente):
+- Drag-and-drop entre slots
+- Click derecho para comer/usar items
+- Sistema de recipes visuales
+- Animación de apertura/cierre
+- Barra de búsqueda/filtros
+
+---
+
+### 4. 🍖 Sistema de hambre refinado con variedad de comida
 **Estado**: ⏳ PLANIFICADO
 **Complejidad**: Media | **Estimado**: 1-2 horas
 
@@ -84,7 +129,7 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 
 ---
 
-### 4. 🏠 Construcción de estructuras y refugios
+### 5. 🏠 Construcción de estructuras y refugios
 **Estado**: ⏳ PLANIFICADO
 **Complejidad**: Alta | **Estimado**: 3-4 horas
 
@@ -114,7 +159,7 @@ Completar The Cubes con 10 features principales para transformarlo de un sandbox
 
 ---
 
-### 5. 💡 Sistema de luz con antorchas y linterna
+### 6. 💡 Sistema de luz con antorchas y linterna
 **Estado**: ⏳ PLANIFICADO
 **Complejidad**: Alta | **Estimado**: 2-3 horas
 
