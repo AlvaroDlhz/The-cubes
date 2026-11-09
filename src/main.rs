@@ -3730,7 +3730,7 @@ fn chunk_file_path(world_path: &Path, coord: IVec3) -> PathBuf {
 }
 
 fn save_chunk_file(world_path: &Path, coord: IVec3, chunk: &Chunk) -> Result<(), String> {
-    if chunk.blocks.len() != CHUNK_VOLUME || chunk.blocks.iter().any(|block| *block > LEAVES) {
+    if chunk.blocks.len() != CHUNK_VOLUME || chunk.blocks.iter().any(|block| *block >= BLOCK_COUNT as u8) {
         return Err(format!("Los datos del chunk {coord:?} no son válidos."));
     }
     let directory = chunk_directory(world_path);
@@ -3769,7 +3769,7 @@ fn load_chunk_file(world_path: &Path, coord: IVec3) -> Result<Option<Chunk>, Str
         .map_err(|error| format!("El archivo del chunk {coord:?} no es válido: {error}"))?;
     if save.coord != coord.to_array()
         || save.blocks.len() != CHUNK_VOLUME
-        || save.blocks.iter().any(|block| *block > LEAVES)
+        || save.blocks.iter().any(|block| *block >= BLOCK_COUNT as u8)
     {
         return Err(format!(
             "Los datos guardados del chunk {coord:?} no son válidos."
