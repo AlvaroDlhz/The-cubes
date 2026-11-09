@@ -17,6 +17,7 @@ bevy = { version = "0.15.3", default-features = false, features = [
     "multi_threaded",
     "tonemapping_luts",
     "x11",
+    "png",
 ] }
 ron = "0.8"
 serde = { version = "1", features = ["derive"] }

@@ -4229,9 +4229,6 @@ fn move_player(
         return;
     };
 
-    // Validate player is not stuck in blocks
-    transform.translation = find_safe_spawn_position(&world, transform.translation);
-
     if keys.just_pressed(KeyCode::KeyF) {
         player.flying = !player.flying;
         player.velocity = Vec3::ZERO;
@@ -4240,6 +4237,15 @@ fn move_player(
             "Movement mode: {}",
             if player.flying { "flight" } else { "walking" }
         );
+    }
+
+    if !player.flying {
+        let safe_position = find_safe_spawn_position(&world, transform.translation);
+        if safe_position != transform.translation {
+            transform.translation = safe_position;
+            player.velocity = Vec3::ZERO;
+            player.grounded = false;
+        }
     }
 
     let mut direction = Vec3::ZERO;
@@ -4664,25 +4670,14 @@ fn can_spawn_mob(kind: MobKind, total: usize, grazers: usize, stalkers: usize) -
         }
 }
 
-/// Find a safe spawn position by checking if player is stuck in blocks
-/// and teleporting to ground level if needed
 fn find_safe_spawn_position(world: &WorldData, mut position: Vec3) -> Vec3 {
-    let ground_x = position.x.floor() as i32;
-    let ground_z = position.z.floor() as i32;
-    
-    // Check if player is inside a solid block
-    for offset_y in -2..=2 {
-        let check_pos = IVec3::new(ground_x, position.y as i32 + offset_y, ground_z);
-        if block_at(world, check_pos) != AIR {
-            // Player is stuck, find safe ground height
-            if let Some(height) = mob_ground_height(world, ground_x, ground_z) {
-                position.y = (height as f32) + PLAYER_EYE_HEIGHT;
-                return position;
-            }
-            // If we can't find ground, teleport higher
-            position.y = (position.y as i32 + 5) as f32;
-            return position;
+    while collides_with_world(world, position) {
+        let next_y = (position.y - PLAYER_EYE_HEIGHT + 0.0001).floor() + 1.0 + PLAYER_EYE_HEIGHT;
+        if next_y <= position.y {
+            error!("Cannot recover player from collision at {:?}", position);
+            break;
         }
+        position.y = next_y;
     }
     position
 }
@@ -5746,6 +5741,120 @@ mod tests {
 
         assert!(!collides_with_world(&world, Vec3::new(0.5, 2.62, 0.5)));
         assert!(collides_with_world(&world, Vec3::new(0.75, 2.62, 0.5)));
+    }
+
+    #[test]
+    fn player_recovery_only_moves_out_of_actual_solid_collisions() {
+        let mut world = WorldData::default();
+        let mut chunk = Chunk::new();
+        chunk.set(IVec3::new(0, 0, 0), STONE);
+        chunk.set(IVec3::new(1, 1, 0), STONE);
+        chunk.set(IVec3::new(1, 2, 0), STONE);
+        chunk.set(IVec3::new(2, 1, 0), SLAB);
+        world.chunks.insert(IVec3::ZERO, chunk);
+
+        let standing = Vec3::new(0.5, 1.0 + PLAYER_EYE_HEIGHT, 0.5);
+        assert_eq!(find_safe_spawn_position(&world, standing), standing);
+        let above_ground = standing + Vec3::Y * 0.5;
+        assert_eq!(find_safe_spawn_position(&world, above_ground), above_ground);
+        let in_slab = Vec3::new(2.5, 1.0 + PLAYER_EYE_HEIGHT, 0.5);
+        assert_eq!(find_safe_spawn_position(&world, in_slab), in_slab);
+
+        let embedded = Vec3::new(0.75, 1.0 + PLAYER_EYE_HEIGHT, 0.5);
+        let recovered = find_safe_spawn_position(&world, embedded);
+        assert!(!collides_with_world(&world, recovered));
+        assert!((recovered.y - (3.0 + PLAYER_EYE_HEIGHT)).abs() < 0.0001);
+        assert_eq!(recovered.xz(), embedded.xz());
+    }
+
+    #[test]
+    fn stationary_player_stays_on_ground_and_can_jump() {
+        let mut world = WorldData::default();
+        let mut chunk = Chunk::new();
+        chunk.set(IVec3::ZERO, STONE);
+        world.chunks.insert(IVec3::ZERO, chunk);
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        app.insert_resource(time)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(world)
+            .insert_resource(Survival::default())
+            .add_systems(Update, move_player);
+        let mut window = Window::default();
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        app.world_mut().spawn((window, PrimaryWindow));
+        let start = Vec3::new(0.5, 1.0 + PLAYER_EYE_HEIGHT, 0.5);
+        let entity = app.world_mut().spawn((
+            Transform::from_translation(start),
+            Player {
+                yaw: 0.0,
+                pitch: 0.0,
+                velocity: Vec3::ZERO,
+                grounded: true,
+                flying: false,
+            },
+        )).id();
+
+        for _ in 0..120 {
+            app.update();
+            let position = app.world().get::<Transform>(entity).unwrap().translation;
+            assert!((position.y - start.y).abs() < 0.001, "{position:?}");
+            assert!(app.world().get::<Player>(entity).unwrap().grounded);
+        }
+
+        app.world_mut().get_mut::<Transform>(entity).unwrap().translation.y += 2.0;
+        app.world_mut().get_mut::<Player>(entity).unwrap().grounded = false;
+        for _ in 0..240 {
+            app.update();
+        }
+        let landed = app.world().get::<Transform>(entity).unwrap().translation;
+        assert!((landed.y - start.y).abs() < 0.001, "{landed:?}");
+        assert!(app.world().get::<Player>(entity).unwrap().grounded);
+
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Space);
+        app.update();
+        assert!(app.world().get::<Transform>(entity).unwrap().translation.y > start.y);
+    }
+
+    #[test]
+    fn flying_inside_blocks_is_not_interrupted_by_recovery() {
+        let mut world = WorldData::default();
+        let mut chunk = Chunk::new();
+        chunk.set(IVec3::ZERO, STONE);
+        world.chunks.insert(IVec3::ZERO, chunk);
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        app.insert_resource(time)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(world)
+            .insert_resource(Survival::default())
+            .add_systems(Update, move_player);
+        let mut window = Window::default();
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        app.world_mut().spawn((window, PrimaryWindow));
+        let start = Vec3::new(0.5, 1.0, 0.5);
+        let entity = app.world_mut().spawn((
+            Transform::from_translation(start),
+            Player {
+                yaw: 0.0,
+                pitch: 0.0,
+                velocity: Vec3::ZERO,
+                grounded: false,
+                flying: true,
+            },
+        )).id();
+
+        app.update();
+        assert_eq!(app.world().get::<Transform>(entity).unwrap().translation, start);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyF);
+        app.update();
+        let position = app.world().get::<Transform>(entity).unwrap().translation;
+        assert!(!collides_with_world(app.world().resource::<WorldData>(), position));
+        assert!((position.y - (1.0 + PLAYER_EYE_HEIGHT)).abs() < 0.001);
     }
 
     #[test]
