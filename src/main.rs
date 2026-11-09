@@ -52,7 +52,9 @@ const SLAB: u8 = 12;
 const BRICKS: u8 = 13;
 const PLANKS: u8 = 14;
 const TORCH: u8 = 15;
-const BLOCK_COUNT: usize = TORCH as usize + 1;
+const WATER: u8 = 16;
+const LAVA: u8 = 17;
+const BLOCK_COUNT: usize = LAVA as usize + 1;
 const LEGACY_BLOCK_COUNT: usize = 4;
 const REACH: f32 = 6.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
@@ -427,6 +429,7 @@ fn main() {
                     update_day_night_lighting,
                     update_sky,
                     stream_world_chunks,
+                    update_particles,
                 ),
                 update_mobs,
                 (
@@ -506,6 +509,13 @@ enum MenuCommand {
 
 #[derive(Component)]
 struct LoadWorldAction(PathBuf);
+
+#[derive(Component)]
+struct BlockParticle {
+    lifetime: f32,
+    max_lifetime: f32,
+    velocity: Vec3,
+}
 
 #[derive(Component)]
 struct FormField(WorldField);
@@ -4026,6 +4036,72 @@ fn autosave_world(
     }
 }
 
+/// Create particle effects when a block is destroyed
+fn spawn_block_particles(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    block_pos: Vec3,
+    block_type: u8,
+) {
+    // Spawn 5 particles per destroyed block
+    let particle_count = 5;
+    let block_color = match block_type {
+        GRASS => Color::linear_rgb(0.3, 0.7, 0.3),
+        DIRT => Color::linear_rgb(0.6, 0.4, 0.2),
+        STONE => Color::linear_rgb(0.5, 0.5, 0.5),
+        SAND => Color::linear_rgb(0.8, 0.75, 0.5),
+        WOOD => Color::linear_rgb(0.4, 0.25, 0.1),
+        LEAVES => Color::linear_rgb(0.2, 0.6, 0.2),
+        WATER => Color::linear_rgb(0.2, 0.5, 0.8),
+        LAVA => Color::linear_rgb(1.0, 0.5, 0.0),
+        _ => Color::linear_rgb(0.7, 0.7, 0.7),
+    };
+    
+    for i in 0..particle_count {
+        let angle = (i as f32 / particle_count as f32) * std::f32::consts::TAU;
+        let speed = 2.0 + (i as f32) * 0.3;
+        let velocity = Vec3::new(angle.cos() * speed, 3.0 + (i as f32) * 0.2, angle.sin() * speed);
+        
+        let mesh = meshes.add(Cuboid::new(0.1, 0.1, 0.1));
+        let material = materials.add(StandardMaterial {
+            base_color: block_color,
+            ..default()
+        });
+        
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(block_pos + Vec3::splat(0.5)),
+            BlockParticle {
+                lifetime: 1.0,
+                max_lifetime: 1.0,
+                velocity,
+            },
+        ));
+    }
+}
+
+fn update_particles(
+    mut commands: Commands,
+    mut particles: Query<(Entity, &mut BlockParticle, &mut Transform)>,
+    time: Res<Time>,
+) {
+    for (entity, mut particle, mut transform) in &mut particles {
+        particle.lifetime -= time.delta_secs();
+        if particle.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        
+        // Physics: apply gravity and velocity
+        let gravity = Vec3::new(0.0, -9.8, 0.0);
+        let dt = time.delta_secs();
+        particle.velocity += gravity * dt;
+        transform.translation += particle.velocity * dt;
+    }
+}
+
 fn capture_pointer(
     mouse: Res<ButtonInput<MouseButton>>,
     crafting_ui: Res<CraftingUi>,
@@ -4939,6 +5015,8 @@ fn edit_blocks(
     mut tools: ResMut<CraftedTools>,
     mut world: ResMut<WorldData>,
     mut storage: ResMut<WorldStorage>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if pointer.captured_this_frame || crafting_ui.open {
         return;
@@ -5060,6 +5138,14 @@ fn edit_blocks(
             }
             chunk.set(local, AIR);
             mined_block = Some(current_block);
+            // Spawn particle effects
+            spawn_block_particles(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                target.as_vec3(),
+                current_block,
+            );
             // Remove door state if removed
             if current_block == WOODEN_DOOR {
                 world.door_states.remove(&target);
@@ -5815,6 +5901,8 @@ mod tests {
             .insert_resource(Inventory::default())
             .insert_resource(CraftedTools::default())
             .insert_resource(WorldStorage::default())
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
             .add_systems(Update, (update_mobs, edit_blocks).chain());
 
         app.update();
