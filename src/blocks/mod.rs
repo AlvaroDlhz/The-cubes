@@ -1,4 +1,5 @@
 // Block types and constants
+use serde::{Deserialize, Serialize};
 pub const CHUNK_SIZE: i32 = 16;
 pub const CHUNK_VOLUME: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize;
 
@@ -33,7 +34,8 @@ pub const TALL_GRASS: u8 = 25;
 pub const COAL_ORE: u8 = 26;
 pub const COPPER_ORE: u8 = 27;
 pub const IRON_ORE: u8 = 28;
-pub const BLOCK_COUNT: usize = IRON_ORE as usize + 1;
+pub const FURNACE: u8 = 29;
+pub const BLOCK_COUNT: usize = FURNACE as usize + 1;
 pub const LEGACY_BLOCK_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,49 @@ pub enum MineralKind {
     Coal,
     RawCopper,
     RawIron,
+    CopperIngot,
+    IronIngot,
+}
+
+/// What a tool head is made of, ordered from weakest to strongest.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum ToolMaterial {
+    #[default]
+    Stone,
+    Copper,
+    Iron,
+}
+
+impl ToolMaterial {
+    pub const ALL: [Self; 3] = [Self::Stone, Self::Copper, Self::Iron];
+
+    /// How many times longer than a stone tool this one lasts.
+    pub fn durability_multiplier(self) -> u32 {
+        match self {
+            Self::Stone => 1,
+            Self::Copper => 2,
+            Self::Iron => 4,
+        }
+    }
+
+    /// Mining time is the block hardness divided by this.
+    pub fn mining_speed(self) -> f32 {
+        match self {
+            Self::Stone => 2.0,
+            Self::Copper => 3.0,
+            Self::Iron => 4.0,
+        }
+    }
+
+    pub fn sword_damage(self) -> u8 {
+        match self {
+            Self::Stone => 2,
+            Self::Copper => 3,
+            Self::Iron => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +106,8 @@ pub struct BlockDefinition {
     pub texture_bottom: &'static str,
     pub solid: bool,
     pub requires_pickaxe: bool,
+    /// Weakest pickaxe that can extract the block when one is required.
+    pub pickaxe_tier: ToolMaterial,
     pub hardness: f32,
     pub drop: Option<BlockDropDefinition>,
     pub experience: u32,
@@ -87,6 +134,7 @@ const fn block_def(
         texture_bottom: texture,
         solid,
         requires_pickaxe: false,
+        pickaxe_tier: ToolMaterial::Stone,
         hardness,
         drop: match drop {
             Some(block) => Some(BlockDropDefinition::Block(block)),
@@ -437,6 +485,7 @@ const BLOCKS: [BlockDefinition; BLOCK_COUNT] = [
     BlockDefinition {
         drop: Some(BlockDropDefinition::Mineral(MineralKind::RawIron)),
         requires_pickaxe: true,
+        pickaxe_tier: ToolMaterial::Copper,
         ..block_def(
             IRON_ORE,
             "Iron Ore",
@@ -449,6 +498,17 @@ const BLOCKS: [BlockDefinition; BLOCK_COUNT] = [
             [0.65, 0.48, 0.37],
         )
     },
+    block_def(
+        FURNACE,
+        "Furnace",
+        "Horno",
+        "furnace",
+        true,
+        3.0,
+        Some(FURNACE),
+        1,
+        [0.45, 0.45, 0.47],
+    ),
 ];
 
 pub fn block_definition(id: u8) -> &'static BlockDefinition {
@@ -465,101 +525,21 @@ pub fn block_texture(id: u8, face: usize) -> usize {
     crate::texture_layout::texture_index(texture)
 }
 
-use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DoorState {
-    Open,
-    Closed,
+/// Plants drawn as two crossed planes instead of a cube.
+pub fn is_cross_plant(id: u8) -> bool {
+    matches!(id, RED_FLOWER | YELLOW_FLOWER | TALL_GRASS)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FoodType {
-    BerryRation,
-    Apple,
-    Mushroom,
-    Wheat,
-    RawMeat,
-    CookedMeat,
-}
-
-impl FoodType {
-    pub fn saturation(&self) -> f32 {
-        match self {
-            FoodType::BerryRation => 4.0,
-            FoodType::Apple => 6.0,
-            FoodType::Mushroom => 2.0,
-            FoodType::Wheat => 8.0,
-            FoodType::RawMeat => 3.0,
-            FoodType::CookedMeat => 8.0,
-        }
-    }
-
-    pub fn is_poisonous(&self) -> bool {
-        matches!(self, FoodType::Mushroom)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StairRotation {
-    North,
-    South,
-    East,
-    West,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StairHalf {
-    Bottom,
-    Top,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CraftRecipe {
-    Shovel,
-    Sword,
-    Arrows,
-    WoodenDoor,
-    Stairs,
-    Slab,
-    Bricks,
-    Planks,
-    Torch,
-}
-
-#[derive(Component, Clone)]
-pub struct CraftedTools {
-    pub shovel_durability: u32,
-    pub sword_durability: u32,
-}
-
-impl Default for CraftedTools {
-    fn default() -> Self {
-        Self {
-            shovel_durability: 64,
-            sword_durability: 64,
-        }
-    }
-}
-
-pub fn block_type_name(block: u8) -> &'static str {
-    block_definition(block).name_en
-}
-
-pub fn is_block_solid(
-    block_type: u8,
-    door_states: &std::collections::HashMap<IVec3, DoorState>,
-    pos: IVec3,
-) -> bool {
-    match block_type {
-        WOODEN_DOOR => {
-            if let Some(&state) = door_states.get(&pos) {
-                !matches!(state, DoorState::Open)
-            } else {
-                true
-            }
-        }
-        _ => block_definition(block_type).solid,
-    }
+/// True when the block is a full cube with no see-through pixels, so it
+/// completely hides the faces of the blocks touching it.
+pub fn block_occludes(id: u8) -> bool {
+    static OCCLUDES: std::sync::LazyLock<[bool; BLOCK_COUNT]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|index| {
+            let id = index as u8;
+            !matches!(id, AIR | WATER | LAVA)
+                && !is_cross_plant(id)
+                && (0..6).all(|face| crate::texture_layout::TEXTURE_OPAQUE[block_texture(id, face)])
+        })
+    });
+    OCCLUDES.get(id as usize).copied().unwrap_or(false)
 }

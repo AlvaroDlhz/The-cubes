@@ -30,7 +30,8 @@ obtención, inventario, uso/crafteo, guardado y presentación.
 - Texturas por alias en `assets/blocks/textures.json`, con atlas generado al
   compilar.
 - IDs estables y migraciones de guardado al cambiar estructuras de datos.
-- Recetas y drops expresados como datos, no dispersos en varios `match`.
+- Recetas y drops expresados como datos, no dispersos en varios `match`
+  (hecho para recetas y drops de bloques).
 
 ### 1. Minería y progresión de materiales — en curso
 
@@ -48,9 +49,14 @@ se recogen como objetos apilables, y los tres minerales exigen un pico. Las
 texturas tienen alias y PNG propios. La versión del terreno aumenta para que
 los mundos nuevos reciban esta generación.
 
-**Siguiente entrega:** horno con combustible y fundición de cobre/hierro; luego
-herramientas de cobre e hierro con requisitos de minería. Añadir más minerales
-cuando tengan un uso dentro de esa progresión.
+También implementado: horno con combustible (carbón, madera, tablones) que
+funde cobre y hierro en lingotes, con contenido persistente; herramientas de
+cobre e hierro con más durabilidad, velocidad y daño; el mineral de hierro
+exige un pico de cobre. Las recetas son una tabla de datos (`RECIPES`).
+
+**Siguiente entrega:** cocinar comida en el horno (requiere que la carne sea un
+objeto de inventario) y añadir más minerales cuando tengan un uso dentro de
+esta progresión.
 
 ### 2. Cultivo y cocina
 

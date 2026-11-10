@@ -29,6 +29,7 @@
     { "name": "gravel", "file": "sand.png" },
     { "name": "coal_ore", "file": "coal_ore.png" },
     { "name": "copper_ore", "file": "copper_ore.png" },
-    { "name": "iron_ore", "file": "iron_ore.png" }
+    { "name": "iron_ore", "file": "iron_ore.png" },
+    { "name": "furnace", "file": "furnace.png" }
   ]
 }

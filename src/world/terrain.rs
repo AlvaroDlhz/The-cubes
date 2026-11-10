@@ -20,13 +20,9 @@ pub enum Biome {
 
 impl Biome {
     pub fn surface_block(self) -> u8 {
-        match self {
-            Self::Plains | Self::Forest => GRASS,
-            Self::Desert | Self::Beach => SAND,
-            Self::Mountain | Self::Volcano | Self::Cave => STONE,
-            Self::Tundra => SNOW,
-            Self::Swamp => MUD,
-        }
+        // Ask the generator's own rules so this can never drift from what
+        // `generate_chunk` actually places on top of a column.
+        biomes::surface_block(self, 0, TerrainBlockPalette::default())
     }
 
     pub fn name(self) -> &'static str {
@@ -126,17 +122,17 @@ pub fn generate_chunk_with_palette(coord: IVec3, seed: u64, blocks: TerrainBlock
                 if world_y <= height {
                     if world_y < height - 4 && is_cave(world_x, world_y, world_z, seed) {
                         if world_y <= SEA_LEVEL && world_y > 5 {
-                            chunk.set(x, local_y, z, blocks.water);
+                            chunk.set_xyz(x, local_y, z, blocks.water);
                         }
                         continue;
                     }
                     let depth = height - world_y;
                     let block = biomes::surface_block(biome, depth, blocks);
-                    chunk.set(x, local_y, z, block);
+                    chunk.set_xyz(x, local_y, z, block);
                 } else if water_level.is_some_and(|level| world_y <= level)
                     || world_y <= SEA_LEVEL && height < SEA_LEVEL
                 {
-                    chunk.set(x, local_y, z, blocks.water);
+                    chunk.set_xyz(x, local_y, z, blocks.water);
                 }
             }
         }
@@ -172,7 +168,7 @@ pub fn generate_chunk_with_palette(coord: IVec3, seed: u64, blocks: TerrainBlock
                         if !(0..CHUNK_SIZE).contains(&lx)
                             || !(0..CHUNK_SIZE).contains(&lz)
                             || !(0..CHUNK_SIZE).contains(&ly)
-                            || chunk.get(lx, ly, lz) != blocks.air
+                            || chunk.get_xyz(lx, ly, lz) != blocks.air
                         {
                             continue;
                         }
@@ -183,7 +179,7 @@ pub fn generate_chunk_with_palette(coord: IVec3, seed: u64, blocks: TerrainBlock
                             } else {
                                 blocks.leaves
                             };
-                        chunk.set(lx, ly, lz, leaf);
+                        chunk.set_xyz(lx, ly, lz, leaf);
                     }
                 }
             }
@@ -202,7 +198,7 @@ pub fn generate_chunk_with_palette(coord: IVec3, seed: u64, blocks: TerrainBlock
             let patch = feature_noise(world_x, world_z, seed ^ 0xDEAD_BEEF, 0.045);
             let roll = coordinate_hash(world_x, world_z, seed ^ 0xBEEF_FACE) % 100;
             let plant = biomes::plant_block(biome, patch, roll, blocks);
-            if plant != blocks.air && chunk.get(x, height + 1 - base_y, z) == blocks.air {
+            if plant != blocks.air && chunk.get_xyz(x, height + 1 - base_y, z) == blocks.air {
                 set_generated_block(&mut chunk, x, height + 1 - base_y, z, plant);
             }
         }
@@ -359,8 +355,8 @@ fn generate_ore_veins(chunk: &mut Chunk, coord: IVec3, seed: u64) {
                                 let local_x = world_x - base_x;
                                 let local_y = world_y - base_y;
                                 let local_z = world_z - base_z;
-                                if chunk.get(local_x, local_y, local_z) == STONE {
-                                    chunk.set(local_x, local_y, local_z, block);
+                                if chunk.get_xyz(local_x, local_y, local_z) == STONE {
+                                    chunk.set_xyz(local_x, local_y, local_z, block);
                                 }
                             }
                         }
@@ -662,6 +658,6 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 pub fn set_generated_block(chunk: &mut Chunk, x: i32, y: i32, z: i32, block: u8) {
     if (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&y) && (0..CHUNK_SIZE).contains(&z)
     {
-        chunk.set(x, y, z, block);
+        chunk.set_xyz(x, y, z, block);
     }
 }

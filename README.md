@@ -1,31 +1,40 @@
 # The Cubes
-## Arquitectura del Proyecto
+## Arquitectura del proyecto
 
-A partir de la versión modular, el proyecto se organiza en módulos bien definidos:
+El juego es una biblioteca (`src/lib.rs`) con un binario mínimo
+(`src/main.rs`) que llama a `the_cubes::run()`.
 
 ```
 src/
-├── main.rs              Punto de entrada y sistema de juego
-├── lib.rs               Exports de módulos públicos
-├── blocks/              Tipos de bloques y constantes
-│   └── mod.rs          Block IDs, FoodType, DoorState, CraftRecipe, is_block_solid()
-├── mobs/                Sistemas de criaturas
-│   └── mod.rs          Mob, MobKind, MobPopulation, MobAssets
-├── world/               Datos y lógica del mundo
-│   ├── mod.rs          WorldData, Chunk, ChunkMesh, LoadingProgress
-│   ├── terrain.rs      Generación procedural (Biome, generate_chunk, biome_at)
-│   ├── collision.rs    Física y colisiones (block_at, collides_with_world, light_level_at)
-│   └── save.rs         Persistencia (WorldSave, snapshot_world, load_world_save)
-└── systems/             Sistemas de juego
-    └── mod.rs          Player, Inventory, Survival, UI components
+├── main.rs            Punto de entrada: llama a the_cubes::run()
+├── lib.rs             Registro de plugins y sistemas, estados y escena de juego
+├── blocks/            IDs y definiciones de bloques
+├── item_inventory.rs  Objetos, pilas, inventario y tabla de recetas
+├── furnace.rs         Simulación del horno: fundición y combustible
+├── texture_layout.rs  Atlas de texturas generado por build.rs
+├── rendering.rs       Mallas de chunk y coordenadas UV
+├── world/
+│   ├── mod.rs         Chunk
+│   ├── data.rs        WorldData, acceso a bloques y punto de aparición
+│   ├── terrain.rs     Generación procedural actual
+│   ├── legacy.rs      Generadores antiguos para mundos ya guardados
+│   └── biomes/        Reglas de cada bioma
+├── streaming.rs       Carga inicial, streaming de chunks y reconstrucción de mallas
+├── save.rs            Formato de guardado, migración y persistencia de chunks
+├── player.rs          Movimiento, cámara y colisiones
+├── mining.rs          Romper y colocar bloques, drops y partículas
+├── survival.rs        Vida, hambre, comida y experiencia
+├── mobs.rs            Criaturas
+├── sky.rs             Ciclo día/noche, cielo, sol y luna
+├── hud.rs             HUD, barra rápida y chat
+├── inventory_ui.rs    Pantallas de inventario y crafteo
+├── menus.rs           Menús, creación de mundo, carga y pausa
+└── tests.rs           Pruebas de integración de los sistemas
 ```
 
-**Beneficios de la modularización:**
-- ✅ Claridad: Cada módulo tiene responsabilidad única
-- ✅ Mantenibilidad: Más fácil localizar y editar código relacionado
-- ✅ Escalabilidad: Preparado para crecimiento a 10,000+ LOC
-- ✅ Pruebas: Los tests están colocados junto al código que prueban
-- ✅ Colaboración: Facilita revisión de código y contribuciones
+Los módulos del juego comparten nombres mediante `use crate::*`; es un paso
+intermedio que mantiene cada área en su archivo sin fijar aún las fronteras
+entre ellas.
 
 
 Prototipo voxel en Rust + Bevy para explorar un sandbox de bloques original.
@@ -49,7 +58,8 @@ medir exactamente 32 × 32 píxeles. Las imágenes iniciales amplían las textur
 anteriores sin añadir detalle; se pueden editar para aprovechar la resolución.
 
 Al compilar, `build.rs` valida los archivos y genera automáticamente un atlas
-de 512 × 512 integrado en el ejecutable. Modificar un PNG requiere recompilar
+de 1024 × 1024 integrado en el ejecutable; cada textura lleva alrededor un borde
+que repite sus píxeles de orilla para que no se mezcle con las vecinas. Modificar un PNG requiere recompilar
 el juego; no hay recarga en caliente. El manifiesto
 `assets/blocks/textures.json` asocia alias con archivos y el atlas asigna las
 posiciones automáticamente. Para añadir un bloque, agrega su textura al
@@ -94,7 +104,8 @@ los guardados anteriores pueden no ser compatibles.
   el progreso; soltar el botón o cambiar de bloque lo reinicia.
 - Clic izquierdo sobre una criatura: golpearla si está bajo la mira y delante
   del bloque.
-- Clic derecho: colocar el bloque seleccionado o consumir una ración seleccionada.
+- Clic derecho: colocar el bloque seleccionado, consumir una ración seleccionada
+  o abrir el horno al que apuntas.
 - `1`–`9` o rueda del ratón: seleccionar un espacio de la barra.
 - `E`: abrir/cerrar el inventario y su cuadrícula 2×2.
 - `R`: consumir una unidad de la comida obtenida al explorar.
@@ -140,8 +151,8 @@ queden en el cursor o las cuadrículas se conservan al cerrar y guardar.
 
 ### Recetas
 
-Las filas se separan con `/`; `M` es madera, `P` piedra, `H` hojas, `A` arena
-y `.` un espacio vacío. Las recetas que caben en 2×2 se pueden hacer en el
+Las filas se separan con `/`; `M` es madera, `P` piedra, `H` hojas, `A` arena,
+`C` lingote de cobre, `F` lingote de hierro y `.` un espacio vacío. Las recetas que caben en 2×2 se pueden hacer en el
 inventario (`E`); las demás necesitan la cuadrícula 3×3 (`C`).
 
 | Resultado | Patrón | Cantidad |
@@ -158,17 +169,42 @@ inventario (`E`); las demás necesitan la cuadrícula 3×3 (`C`).
 | Ladrillos | `PP/PP` | 4 |
 | Tablones | `M` | 4 |
 | Antorchas | `P/M` | 8 |
+| Horno | `PPP/P.P/PPP` | 1 |
+
+Las cuatro herramientas se fabrican también en cobre e hierro con el mismo
+patrón, cambiando la piedra por lingotes (por ejemplo, pico de cobre:
+`CCC/.M./.M.`). Todas las recetas están en la tabla `RECIPES` de
+`src/item_inventory.rs`; añadir una entrada basta para que funcione en ambas
+cuadrículas.
+
+### Horno y metales
+
+Coloca un horno y ábrelo con clic derecho. Tiene un espacio para el material,
+otro para el combustible y uno de salida del que solo se puede retirar. Funde
+cobre y hierro en bruto en lingotes; cada unidad tarda 8 segundos. El carbón
+alimenta 8 fundiciones por unidad, la madera 1,5 y los tablones 0,75. El
+combustible solo se enciende cuando hay algo que fundir, y el horno sigue
+trabajando aunque cierres su pantalla o te alejes. Al romperlo suelta lo que
+contenga. Su contenido se guarda con el mundo.
+
+| Material | Usos (espada) | Tiempo de minería | Daño de espada |
+|---|---:|---:|---:|
+| Piedra | 64 (32) | dureza / 2 | 2 |
+| Cobre | 128 (64) | dureza / 3 | 3 |
+| Hierro | 256 (128) | dureza / 4 | 4 |
+
+El carbón y el cobre se extraen con cualquier pico; el mineral de hierro exige
+un pico de cobre o mejor.
 
 Las flechas son objetos de inventario; todavía no hay arco ni disparo.
 
 Las puertas cerradas bloquean el paso del jugador; abiertas permiten movimiento libre.
 Escaleras y losas no son bloqueantes para colisión pero se renderizan en el mundo
 (implementación parcial: renderización completa, colisión pasable). Las herramientas
-de minería tienen 64 usos (32 para espada) y dan materiales y experiencia adicionales.
-Selecciona la herramienta en la barra: el pico sirve para piedra, el hacha para
-madera y hojas, y la pala para arena y tierra. Estas herramientas reducen a la
-mitad el tiempo de minería y gastan un uso solo al romper el bloque; la espada
-golpea con +1 daño.
+de minería dan materiales y experiencia adicionales.
+Selecciona la herramienta en la barra: el pico sirve para piedra, minerales y
+hornos, el hacha para madera y hojas, y la pala para arena y tierra. Gastan un
+uso solo al romper el bloque.
 Las pilas, la selección y la durabilidad se conservan al guardar el mundo.
 
 El ciclo día/noche dura 24 minutos reales: cada minuto real equivale a una hora
