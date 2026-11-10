@@ -66,13 +66,13 @@ pub fn snapshot_world(
 
 pub fn load_world_save(path: &PathBuf) -> Result<WorldSave, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
-    let save: WorldSave = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
-    
+    let save: WorldSave =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
     if save.version != SAVE_VERSION {
         return Err(format!("Unsupported save version: {}", save.version));
     }
-    
+
     Ok(save)
 }
 

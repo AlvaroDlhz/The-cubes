@@ -3,13 +3,13 @@ use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-pub mod terrain;
-pub mod save;
 pub mod collision;
+pub mod save;
+pub mod terrain;
 
-pub use terrain::{generate_chunk, biome_at, terrain_height, coordinate_hash, Biome};
-pub use save::{WorldSave, ChunkSave, snapshot_world, load_world_save, save_world, SAVE_VERSION};
-pub use collision::{block_at, set_block, collides_with_world, mob_ground_height, light_level_at};
+pub use collision::{block_at, collides_with_world, light_level_at, mob_ground_height, set_block};
+pub use save::{load_world_save, save_world, snapshot_world, ChunkSave, WorldSave, SAVE_VERSION};
+pub use terrain::{biome_at, coordinate_hash, generate_chunk, terrain_height, Biome};
 
 #[derive(Resource, Default)]
 pub struct DayNightCycle {

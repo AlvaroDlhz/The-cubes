@@ -11,74 +11,78 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "plains-audio")]
+use bevy::audio::{AudioPlayer, PlaybackSettings, Volume};
 use bevy::{
+    image::ImageSampler,
     input::{
         keyboard::{Key, KeyboardInput},
         mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     },
     prelude::*,
-    render::{mesh::Indices, render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
-    window::{CursorGrabMode, PrimaryWindow, WindowPlugin},
+    render::{
+        mesh::Indices,
+        render_asset::RenderAssetUsages,
+        render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
+    },
+    window::{CursorGrabMode, MonitorSelection, PrimaryWindow, WindowMode, WindowPlugin},
 };
 use serde::{Deserialize, Serialize};
 
 // Module declarations
 mod blocks;
+mod item_inventory;
 mod mobs;
-mod world;
 mod systems;
+mod texture_layout;
+mod world;
 
 // Selective imports from modules
 use blocks::*;
+use item_inventory::{Inventory, Item, ItemStack, ToolKind, HOTBAR_SIZE, INVENTORY_SIZE};
 use mobs::*;
-use world::*;
 use systems::*;
+use world::*;
 
-const CHUNK_SIZE: i32 = 16;
-const CHUNK_VOLUME: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize;
-const AIR: u8 = 0;
-const GRASS: u8 = 1;
-const DIRT: u8 = 2;
-const STONE: u8 = 3;
-const SAND: u8 = 4;
-const WOOD: u8 = 5;
-const LEAVES: u8 = 6;
-const APPLE: u8 = 7;
-const WHEAT: u8 = 8;
-const MUSHROOM: u8 = 9;
-const WOODEN_DOOR: u8 = 10;
-const STAIRS: u8 = 11;
-const SLAB: u8 = 12;
-const BRICKS: u8 = 13;
-const PLANKS: u8 = 14;
-const TORCH: u8 = 15;
-const WATER: u8 = 16;
-const LAVA: u8 = 17;
-const BLOCK_COUNT: usize = LAVA as usize + 1;
-const LEGACY_BLOCK_COUNT: usize = 4;
+const WORLD_HEIGHT: i32 = 128;
+const SEA_LEVEL: i32 = 48;
+const TERRAIN_VERSION: u32 = 4;
 const REACH: f32 = 6.0;
-const PLAYER_HALF_WIDTH: f32 = 0.3;
+const PLAYER_HALF_WIDTH: f32 = 0.30;
 const PLAYER_EYE_HEIGHT: f32 = 1.62;
 const PLAYER_HEADROOM: f32 = 0.18;
 const WALK_SPEED: f32 = 5.0;
 const SPRINT_SPEED: f32 = 8.0;
+const GROUND_ACCELERATION: f32 = 28.0;
+const GROUND_FRICTION: f32 = 36.0;
+const AIR_ACCELERATION: f32 = 6.0;
+const AIR_DRAG: f32 = 1.2;
+const FLIGHT_ACCELERATION: f32 = 42.0;
+const FLIGHT_FRICTION: f32 = 30.0;
 const GRAVITY: f32 = 24.0;
 const JUMP_SPEED: f32 = 8.5;
 const STEP_HEIGHT: f32 = 1.0;
-const SAVE_VERSION: u32 = 1;
-const STREAM_LOAD_RADIUS: i32 = 3;
-const STREAM_UNLOAD_RADIUS: i32 = 4;
+const STEP_UP_SPEED: f32 = 7.0;
+const JUMP_BUFFER_SECONDS: f32 = 0.12;
+const COYOTE_TIME_SECONDS: f32 = 0.10;
+const SAVE_VERSION: u32 = 3;
+const STREAM_LOAD_RADIUS: i32 = 10;
+const STREAM_UNLOAD_RADIUS: i32 = 11;
+const STARTUP_LOAD_RADIUS: i32 = 3;
+const STREAM_VERTICAL_RADIUS: i32 = 1;
+const MAX_DIRTY_CHUNK_MESH_REBUILDS_PER_FRAME: usize = 8;
+const MAX_CHUNK_UNLOADS_PER_FRAME: usize = 2;
 const GAME_DAY_SECONDS: f32 = 24.0 * 60.0 * 60.0;
 const GAME_SECONDS_PER_REAL_SECOND: f32 = 60.0;
 const DEFAULT_TIME_OF_DAY_SECONDS: f32 = 8.0 * 60.0 * 60.0;
 const SKY_RADIUS: f32 = 180.0;
 const CELESTIAL_RADIUS: f32 = 120.0;
 const STAR_RADIUS: f32 = 145.0;
-const HOTBAR_SLOT_COUNT: usize = 6;
-const HOTBAR_BLOCKS: [u8; HOTBAR_SLOT_COUNT] = [GRASS, DIRT, STONE, SAND, WOOD, LEAVES];
+const HOTBAR_SLOT_COUNT: usize = HOTBAR_SIZE;
 const AUTOSAVE_INTERVAL_SECONDS: f32 = 60.0;
 const MAX_HEALTH: f32 = 20.0;
 const MAX_HUNGER: f32 = 20.0;
+const MINING_CRACK_STAGES: usize = 8;
 const PASSIVE_HUNGER_INTERVAL: f32 = 75.0;
 const SPRINT_HUNGER_INTERVAL: f32 = 30.0;
 const STARVATION_DAMAGE_INTERVAL: f32 = 10.0;
@@ -97,83 +101,44 @@ const MOB_DESPAWN_DISTANCE: f32 = 40.0;
 mod rendering {
     use super::*;
 
-    /// Get texture variant (0-3) based on world position
-    /// Uses block coordinates to deterministically select variant
-    /// Ensures same block at same location always has same texture
-    pub fn block_variant(x: i32, y: i32, z: i32) -> u32 {
-        // Create a simple hash from coordinates
-        let hash = ((x.wrapping_mul(73856093) 
-                   ^ y.wrapping_mul(19349663) 
-                   ^ z.wrapping_mul(83492791)) as u32).wrapping_mul(2654435761);
-        hash % 4
+    /// Textures keep the same orientation in every block position.
+    pub fn block_variant(_x: i32, _y: i32, _z: i32) -> u32 {
+        0
     }
 
-    /// Rotate UV coordinates by 90 degrees clockwise
-    /// Transforms (p0, p1, p2, p3) where p3 is top-left
-    fn rotate_uv_90(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-        // Rotate 90 degrees: corners shift in order
-        (uv3, uv0, uv1, uv2)
-    }
-
-    /// Rotate UV coordinates by 180 degrees
-    fn rotate_uv_180(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-        (uv2, uv3, uv0, uv1)
-    }
-
-    /// Rotate UV coordinates by 270 degrees clockwise (90 counter-clockwise)
-    fn rotate_uv_270(uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2], uv3: [f32; 2]) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-        (uv1, uv2, uv3, uv0)
-    }
-
-    /// Apply texture variant rotation to UV coordinates
-    /// Variant 0: No rotation
-    /// Variant 1: 90 degrees
-    /// Variant 2: 180 degrees
-    /// Variant 3: 270 degrees
-    fn apply_variant(
-        variant: u32,
-        uv0: [f32; 2],
-        uv1: [f32; 2],
-        uv2: [f32; 2],
-        uv3: [f32; 2],
-    ) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-        match variant {
-            0 => (uv0, uv1, uv2, uv3),
-            1 => rotate_uv_90(uv0, uv1, uv2, uv3),
-            2 => rotate_uv_180(uv0, uv1, uv2, uv3),
-            3 => rotate_uv_270(uv0, uv1, uv2, uv3),
-            _ => (uv0, uv1, uv2, uv3),
-        }
-    }
-
-    /// Get UV coordinates in the atlas for a block type with variant rotation
+    /// Get upright UV coordinates in the atlas for one block face.
     /// Atlas is 16x16 grid, each tile is 1/16th of the texture
     /// Returns (u_min, v_min, u_max, v_max) in normalized coordinates [0, 1]
-    /// Applies rotation based on variant parameter
-    pub fn block_uv(block: u8, face: usize, variant: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+    pub fn block_uv(
+        block: u8,
+        face: usize,
+        _variant: u32,
+    ) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
         // Map block type to atlas tile position
         // Special case: GRASS has different top and side textures
-        let tile_id = if block == GRASS && face == 2 {
-            2  // Grass top is tile 2 (green)
-        } else {
-            block as usize
-        };
-        
-        let tile_x = tile_id % 16;
-        let tile_y = tile_id / 16;
-        let uv_min_x = tile_x as f32 / 16.0;
-        let uv_max_x = (tile_x as f32 + 1.0) / 16.0;
-        let uv_min_y = tile_y as f32 / 16.0;
-        let uv_max_y = (tile_y as f32 + 1.0) / 16.0;
-        
+        let tile_id = block_texture(block, face);
+
+        let columns = texture_layout::ATLAS_COLUMNS as usize;
+        let tile_x = tile_id % columns;
+        let tile_y = tile_id / columns;
+        let uv_min_x = tile_x as f32 / columns as f32;
+        let uv_max_x = (tile_x as f32 + 1.0) / columns as f32;
+        let uv_min_y = tile_y as f32 / columns as f32;
+        let uv_max_y = (tile_y as f32 + 1.0) / columns as f32;
+
         // Base UV corners: (bottom-left, bottom-right, top-right, top-left)
         let base_uv0 = [uv_min_x, uv_min_y];
         let base_uv1 = [uv_max_x, uv_min_y];
         let base_uv2 = [uv_max_x, uv_max_y];
         let base_uv3 = [uv_min_x, uv_max_y];
-        
-        // Apply variant rotation
-        apply_variant(variant, base_uv0, base_uv1, base_uv2, base_uv3)
+
+        // PNG/atlas V=0 is the top row. Map top vertices to the top of the
+        // texture on every side, accounting for each face's vertex winding.
+        match face {
+            0 | 5 => (base_uv3, base_uv0, base_uv1, base_uv2),
+            1 | 4 => (base_uv3, base_uv2, base_uv1, base_uv0),
+            _ => (base_uv0, base_uv1, base_uv2, base_uv3),
+        }
     }
 
     /// Get shading multiplier based on face direction for depth perception
@@ -200,94 +165,131 @@ mod rendering {
         mesh
     }
 
-    /// Greedy mesh algorithm: merge coplanar block faces into rectangles
-    /// Reduces vertex count and draw calls significantly
-    pub fn greedy_rectangles(mask: &mut [u8], mut emit: impl FnMut(usize, usize, usize, usize, u8)) {
-        let size = CHUNK_SIZE as usize;
-        debug_assert_eq!(mask.len(), size * size);
-
-        for v in 0..size {
-            for u in 0..size {
-                let block = mask[v * size + u];
-                if block == AIR {
-                    continue;
-                }
-
-                let mut width = 1;
-                while u + width < size && mask[v * size + u + width] == block {
-                    width += 1;
-                }
-
-                let mut height = 1;
-                'extend_height: while v + height < size {
-                    for next_u in u..u + width {
-                        if mask[(v + height) * size + next_u] != block {
-                            break 'extend_height;
-                        }
-                    }
-                    height += 1;
-                }
-
-                for next_v in v..v + height {
-                    for next_u in u..u + width {
-                        mask[next_v * size + next_u] = AIR;
-                    }
-                }
-                emit(u, v, width, height, block);
-            }
+    fn append_quad_indices(
+        base: u32,
+        indices_u16: &mut Vec<u16>,
+        indices_u32: &mut Option<Vec<u32>>,
+    ) {
+        let quad = [base, base + 1, base + 2, base, base + 2, base + 3];
+        if let Some(indices) = indices_u32 {
+            indices.extend_from_slice(&quad);
+        } else if quad[5] <= u16::MAX as u32 {
+            indices_u16.extend_from_slice(&[
+                base as u16,
+                (base + 1) as u16,
+                (base + 2) as u16,
+                base as u16,
+                (base + 2) as u16,
+                (base + 3) as u16,
+            ]);
+        } else {
+            let mut indices = Vec::with_capacity(indices_u16.len() + quad.len());
+            indices.extend(indices_u16.drain(..).map(u32::from));
+            indices.extend_from_slice(&quad);
+            *indices_u32 = Some(indices);
         }
     }
 
-    /// Build complete mesh for a chunk
-    /// Uses greedy algorithm to minimize vertices, applies face culling
+    /// Build complete mesh for a chunk.
+    /// Reads blocks in storage order and emits visible faces without revisiting
+    /// the chunk once for each face direction.
     pub fn build_chunk_mesh(world: &WorldData, coord: IVec3) -> Mesh {
         let mut positions = Vec::<[f32; 3]>::new();
         let mut normals = Vec::<[f32; 3]>::new();
         let mut uvs = Vec::<[f32; 2]>::new();
-        let mut indices = Vec::<u32>::new();
+        let mut indices_u16 = Vec::<u16>::new();
+        let mut indices_u32 = None;
         let Some(chunk) = world.chunks.get(&coord) else {
             return empty_mesh();
         };
 
-        for axis in 0..3 {
-            let u_axis = (axis + 1) % 3;
-            let v_axis = (axis + 2) % 3;
-            let mut normal = IVec3::ZERO;
-
-            for positive in [true, false] {
-                normal[axis] = if positive { 1 } else { -1 };
-                let face_index = axis * 2 + if positive { 0 } else { 1 };
-
-                for slice in 0..CHUNK_SIZE {
-                    let mut mask = [AIR; (CHUNK_SIZE * CHUNK_SIZE) as usize];
-                    for v in 0..CHUNK_SIZE {
-                        for u in 0..CHUNK_SIZE {
-                            let mut local = IVec3::ZERO;
-                            local[axis] = slice;
-                            local[u_axis] = u;
-                            local[v_axis] = v;
-
-                            let block = chunk.get(local);
-                            if block == AIR {
-                                continue;
-                            }
-                            let neighbor = coord * CHUNK_SIZE + local + normal;
-                            if super::block_at(world, neighbor) == AIR {
-                                mask[(v * CHUNK_SIZE + u) as usize] = block;
-                            }
-                        }
+        // Chunk storage is X-contiguous, so this loop reads it sequentially.
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let local = IVec3::new(x, y, z);
+                    let block = chunk.get(local);
+                    if block == AIR {
+                        continue;
                     }
 
-                    greedy_rectangles(&mut mask, |u, v, width, height, block| {
-                        let mut origin = IVec3::ZERO;
-                        origin[axis] = slice + if positive { 1 } else { 0 };
-                        origin[u_axis] = u as i32;
-                        origin[v_axis] = v as i32;
+                    let block_pos = coord * CHUNK_SIZE + local;
+                    let variant = block_variant(block_pos.x, block_pos.y, block_pos.z);
+                    if matches!(block, RED_FLOWER | YELLOW_FLOWER | TALL_GRASS) {
+                        let origin = local.as_vec3();
+                        let planes = [
+                            (
+                                [
+                                    origin,
+                                    origin + Vec3::new(1.0, 0.0, 1.0),
+                                    origin + Vec3::new(1.0, 1.0, 1.0),
+                                    origin + Vec3::Y,
+                                ],
+                                Vec3::new(-1.0, 0.0, 1.0).normalize(),
+                            ),
+                            (
+                                [
+                                    origin + Vec3::X,
+                                    origin + Vec3::Z,
+                                    origin + Vec3::new(0.0, 1.0, 1.0),
+                                    origin + Vec3::new(1.0, 1.0, 0.0),
+                                ],
+                                Vec3::new(1.0, 0.0, 1.0).normalize(),
+                            ),
+                        ];
+                        let (uv0, uv1, uv2, uv3) = block_uv(block, 2, variant);
+                        for (corners, normal) in planes {
+                            for reverse in [false, true] {
+                                let ordered = if reverse {
+                                    [corners[3], corners[2], corners[1], corners[0]]
+                                } else {
+                                    corners
+                                };
+                                let base = positions.len() as u32;
+                                for (corner, uv) in ordered.iter().zip([uv0, uv1, uv2, uv3].iter())
+                                {
+                                    positions.push(corner.to_array());
+                                    normals.push(normal.to_array());
+                                    uvs.push(*uv);
+                                }
+                                append_quad_indices(base, &mut indices_u16, &mut indices_u32);
+                            }
+                        }
+                        continue;
+                    }
+                    for face_index in 0..6 {
+                        let axis = face_index / 2;
+                        let positive = face_index % 2 == 0;
+                        let mut normal = IVec3::ZERO;
+                        normal[axis] = if positive { 1 } else { -1 };
+
+                        let crosses_chunk_boundary = if positive {
+                            local[axis] == CHUNK_SIZE - 1
+                        } else {
+                            local[axis] == 0
+                        };
+                        let neighbor_block = if crosses_chunk_boundary {
+                            super::block_at(world, block_pos + normal)
+                        } else {
+                            chunk.get(local + normal)
+                        };
+                        // Fluid blocks must not hide the solid face behind them.
+                        if neighbor_block != AIR
+                            && neighbor_block != WATER
+                            && neighbor_block != LAVA
+                        {
+                            continue;
+                        }
+
+                        let u_axis = (axis + 1) % 3;
+                        let v_axis = (axis + 2) % 3;
+                        let mut origin = local;
+                        origin[axis] += if positive { 1 } else { 0 };
 
                         let mut u_direction = IVec3::ZERO;
-                        u_direction[u_axis] = width as i32;
+                        u_direction[u_axis] = 1;
                         let mut v_direction = IVec3::ZERO;
-                        v_direction[v_axis] = height as i32;
+                        v_direction[v_axis] = 1;
 
                         let origin = origin.as_vec3();
                         let u_direction = u_direction.as_vec3();
@@ -307,27 +309,17 @@ mod rendering {
                                 origin + u_direction,
                             ]
                         };
-                        
-                        let block_pos = (coord * CHUNK_SIZE + origin.as_ivec3()).to_array();
-                        let variant = block_variant(block_pos[0], block_pos[1], block_pos[2]);
+
                         let (uv0, uv1, uv2, uv3) = block_uv(block, face_index, variant);
                         let _shade = face_shade(face_index);
-                        
                         let base = positions.len() as u32;
                         for (corner, uv) in corners.iter().zip([uv0, uv1, uv2, uv3].iter()) {
                             positions.push(corner.to_array());
                             normals.push(normal.as_vec3().to_array());
                             uvs.push(*uv);
                         }
-                        indices.extend_from_slice(&[
-                            base,
-                            base + 1,
-                            base + 2,
-                            base,
-                            base + 2,
-                            base + 3,
-                        ]);
-                    });
+                        append_quad_indices(base, &mut indices_u16, &mut indices_u32);
+                    }
                 }
             }
         }
@@ -339,17 +331,208 @@ mod rendering {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.insert_indices(Indices::U32(indices));
+        mesh.insert_indices(match indices_u32 {
+            Some(indices) => Indices::U32(indices),
+            None => Indices::U16(indices_u16),
+        });
         mesh
     }
 }
 
+fn run_performance_bench() {
+    const WARMUP_SAMPLES: usize = 8;
+    const MEASURED_SAMPLES: usize = 128;
+    const BENCH_SEED: u64 = 0xC0BE_2026;
+
+    let mut generation_samples = Vec::with_capacity(MEASURED_SAMPLES);
+    for sample in 0..WARMUP_SAMPLES + MEASURED_SAMPLES {
+        let offset = sample as i32;
+        let coord = IVec3::new(offset % 9 - 4, 4, offset / 9 - 2);
+        let started = std::time::Instant::now();
+        let chunk = generate_chunk(coord, BENCH_SEED);
+        let elapsed = started.elapsed();
+        std::hint::black_box(chunk);
+        if sample >= WARMUP_SAMPLES {
+            generation_samples.push(elapsed);
+        }
+    }
+
+    let mut world = WorldData::default();
+    for y in 3..=5 {
+        for z in -1..=1 {
+            for x in -1..=1 {
+                let coord = IVec3::new(x, y, z);
+                world
+                    .chunks
+                    .insert(coord, generate_chunk(coord, BENCH_SEED));
+            }
+        }
+    }
+
+    let mut mesh_coords = world.chunks.keys().copied().collect::<Vec<_>>();
+    mesh_coords.sort_unstable_by_key(|coord| coord.to_array());
+    let mut mesh_samples = Vec::with_capacity(MEASURED_SAMPLES);
+    let mut mesh_bytes_total = 0usize;
+    for sample in 0..WARMUP_SAMPLES + MEASURED_SAMPLES {
+        let coord = mesh_coords[sample % mesh_coords.len()];
+        let started = std::time::Instant::now();
+        let mesh = rendering::build_chunk_mesh(&world, coord);
+        let elapsed = started.elapsed();
+        if sample >= WARMUP_SAMPLES {
+            mesh_samples.push(elapsed);
+            mesh_bytes_total += mesh_vertex_count(&mesh) * 32 + mesh_index_bytes(&mesh);
+        }
+        std::hint::black_box(mesh);
+    }
+
+    println!("The Cubes performance sample ({MEASURED_SAMPLES} measured iterations)");
+    report_performance_samples("Chunk generation", generation_samples);
+    report_performance_samples("Chunk mesh", mesh_samples);
+    let mean_mesh_bytes = mesh_bytes_total / MEASURED_SAMPLES;
+    let target_chunks = (STREAM_LOAD_RADIUS * 2 + 1).pow(2) as usize * 3;
+    let resident_chunk_bound = (STREAM_UNLOAD_RADIUS * 2 + 1).pow(2) as usize * 3;
+    println!("Sample mean chunk mesh buffers: {mean_mesh_bytes} bytes");
+    println!(
+        "Target chunks at load radius {STREAM_LOAD_RADIUS}: {target_chunks}; resident upper bound at unload radius {STREAM_UNLOAD_RADIUS}: {resident_chunk_bound}"
+    );
+    println!(
+        "Estimated vertex/index payload at resident bound: {} MiB",
+        mean_mesh_bytes * resident_chunk_bound / (1024 * 1024)
+    );
+    println!(
+        "Chunk block storage at resident bound: {} MiB",
+        resident_chunk_bound * CHUNK_VOLUME / (1024 * 1024)
+    );
+}
+
+fn report_performance_samples(label: &str, mut samples: Vec<std::time::Duration>) {
+    samples.sort_unstable();
+    let total_nanos: u128 = samples.iter().map(std::time::Duration::as_nanos).sum();
+    let average_ms = total_nanos as f64 / samples.len() as f64 / 1_000_000.0;
+    let median_ms = samples[samples.len() / 2].as_secs_f64() * 1_000.0;
+    let p95_index = ((samples.len() * 95 + 99) / 100).saturating_sub(1);
+    let p95_ms = samples[p95_index].as_secs_f64() * 1_000.0;
+    let max_ms = samples.last().unwrap().as_secs_f64() * 1_000.0;
+    println!("{label}: mean {average_ms:.3} ms, median {median_ms:.3} ms, p95 {p95_ms:.3} ms, max {max_ms:.3} ms");
+}
+
+fn mesh_vertex_count(mesh: &Mesh) -> usize {
+    match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) => positions.len(),
+        _ => 0,
+    }
+}
+
+fn mesh_index_bytes(mesh: &Mesh) -> usize {
+    match mesh.indices() {
+        Some(Indices::U16(indices)) => indices.len() * 2,
+        Some(Indices::U32(indices)) => indices.len() * 4,
+        None => 0,
+    }
+}
+
+fn run_plains_generation_report() {
+    let seeds = [42, 1337, 812, 2026, 987_654_321];
+    println!("Pradera: resumen determinista para varias semillas");
+    for seed in seeds {
+        let (spawn_x, spawn_y, spawn_z) = world_spawn_point(seed, TERRAIN_VERSION);
+        println!(
+            "seed {seed}: aparición seca en ({:.0}, {}, {:.0})",
+            spawn_x, spawn_y, spawn_z
+        );
+        let mut plains_columns = 0usize;
+        let mut columns = 0usize;
+        let mut tall_grass = 0usize;
+        let mut red_flowers = 0usize;
+        let mut yellow_flowers = 0usize;
+        let mut wheat = 0usize;
+        for sample_z in -6..=6 {
+            for sample_x in -6..=6 {
+                // Sample across a broad climate range while generating only
+                // one chunk per point, so this stays fast enough for tuning.
+                let chunk_x = sample_x * 8;
+                let chunk_z = sample_z * 8;
+                let center_x = chunk_x * CHUNK_SIZE + CHUNK_SIZE / 2;
+                let center_z = chunk_z * CHUNK_SIZE + CHUNK_SIZE / 2;
+                let surface_y = terrain_height(center_x, center_z, seed);
+                let chunk = generate_chunk(
+                    IVec3::new(chunk_x, surface_y.div_euclid(CHUNK_SIZE), chunk_z),
+                    seed,
+                );
+                for z in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        columns += 1;
+                        if world::terrain::biome_at(
+                            chunk_x * CHUNK_SIZE + x,
+                            chunk_z * CHUNK_SIZE + z,
+                            seed,
+                        ) == Biome::Plains
+                        {
+                            plains_columns += 1;
+                        }
+                    }
+                }
+                tall_grass += chunk
+                    .blocks
+                    .iter()
+                    .filter(|&&block| block == TALL_GRASS)
+                    .count();
+                red_flowers += chunk
+                    .blocks
+                    .iter()
+                    .filter(|&&block| block == RED_FLOWER)
+                    .count();
+                yellow_flowers += chunk
+                    .blocks
+                    .iter()
+                    .filter(|&&block| block == YELLOW_FLOWER)
+                    .count();
+                wheat += chunk.blocks.iter().filter(|&&block| block == WHEAT).count();
+            }
+        }
+        println!(
+            "seed {seed}: {plains_columns}/{columns} columnas de pradera; hierba alta {tall_grass}, flores rojas {red_flowers}, amarillas {yellow_flowers}, trigo {wheat}"
+        );
+    }
+}
+
 fn main() {
+    if std::env::args().any(|argument| argument == "--perf-bench") {
+        run_performance_bench();
+        return;
+    }
+    if std::env::args().any(|argument| argument == "--plains-report") {
+        run_plains_generation_report();
+        return;
+    }
+    if std::env::args().any(|argument| argument == "--world-list-report") {
+        match data_directory()
+            .and_then(|directory| fs::read_dir(directory).map_err(|error| format!("{error}")))
+        {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|extension| extension.to_str()) != Some("ron") {
+                        continue;
+                    }
+                    match load_world(&path) {
+                        Ok(save) => println!("OK: {} ({})", save.name, path.display()),
+                        Err(error) => println!("ERROR: {}: {error}", path.display()),
+                    }
+                }
+            }
+            Err(error) => eprintln!("No se pudo listar los mundos: {error}"),
+        }
+        return;
+    }
+
     App::new()
+        .insert_resource(Time::<Fixed>::from_hz(120.0))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "The Cubes".into(),
                 resolution: (1280.0_f32, 720.0_f32).into(),
+                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
                 ..default()
             }),
             ..default()
@@ -361,30 +544,42 @@ fn main() {
         .init_resource::<Inventory>()
         .init_resource::<Survival>()
         .init_resource::<CraftedTools>()
+        .init_resource::<MiningState>()
+        .init_resource::<MiningVisuals>()
         .init_resource::<CraftingUi>()
+        .init_resource::<ChatState>()
         .init_resource::<WorldForm>()
         .init_resource::<PendingWorld>()
+        .init_resource::<SelectedWorld>()
         .init_resource::<TextureAssets>()
         .init_resource::<WorldStorage>()
+        .init_resource::<ChunkStreamingState>()
         .init_resource::<LoadingProgress>()
         .init_resource::<DayNightCycle>()
         .init_resource::<MobPopulation>()
         .init_resource::<MobAssets>()
         .init_state::<AppState>()
+        .add_plugins(WorldScenePlugin)
         .add_systems(OnEnter(AppState::MainMenu), setup_main_menu)
         .add_systems(OnExit(AppState::MainMenu), cleanup_menu)
         .add_systems(OnEnter(AppState::WorldSelect), setup_world_select)
         .add_systems(OnExit(AppState::WorldSelect), cleanup_menu)
+        .add_systems(
+            OnEnter(AppState::ConfirmDeleteWorld),
+            setup_delete_world_confirmation,
+        )
+        .add_systems(OnExit(AppState::ConfirmDeleteWorld), cleanup_menu)
         .add_systems(OnEnter(AppState::CreateWorld), setup_create_world)
         .add_systems(OnExit(AppState::CreateWorld), cleanup_menu)
         .add_systems(OnEnter(AppState::LoadingWorld), begin_loading_world)
         .add_systems(OnEnter(AppState::LoadingWorld), setup_loading_screen)
         .add_systems(OnExit(AppState::LoadingWorld), cleanup_menu)
-        .add_systems(OnEnter(AppState::InGame), load_textures)
-        .add_systems(OnEnter(AppState::InGame), setup_game_scene.after(load_textures).run_if(wait_for_textures))
         .add_systems(OnEnter(AppState::Paused), setup_pause_menu)
         .add_systems(OnExit(AppState::Paused), cleanup_pause_menu)
+        .add_systems(OnExit(AppState::InGame), reset_mining)
+        .add_systems(OnExit(AppState::InGame), cleanup_plains_ambience)
         .add_systems(OnEnter(AppState::MainMenu), cleanup_game_scene)
+        .add_systems(FixedUpdate, move_player.run_if(in_state(AppState::InGame)))
         .add_systems(
             Update,
             (
@@ -397,6 +592,7 @@ fn main() {
                 .run_if(
                     in_state(AppState::MainMenu)
                         .or(in_state(AppState::WorldSelect))
+                        .or(in_state(AppState::ConfirmDeleteWorld))
                         .or(in_state(AppState::CreateWorld))
                         .or(in_state(AppState::LoadingWorld))
                         .or(in_state(AppState::Paused)),
@@ -421,28 +617,38 @@ fn main() {
             (
                 (
                     capture_pointer,
+                    chat_input,
+                    update_chat_bar,
                     look,
-                    move_player,
                     update_survival,
-                    consume_food,
+                    consume_stored_food,
                     advance_day_night,
                     update_day_night_lighting,
                     update_sky,
                     stream_world_chunks,
                     update_particles,
                     animate_water_lava,
+                    update_plains_ambience,
                 ),
                 update_mobs,
                 (
-                    select_block,
-                    select_hotbar,
-                    update_hud,
+                    select_block.before(sync_selected_block),
+                    select_hotbar.before(sync_selected_block),
+                    (
+                        inventory_controls,
+                        inventory_clicks,
+                        sync_selected_block,
+                        update_inventory_ui,
+                    )
+                        .chain()
+                        .before(edit_blocks)
+                        .before(pause_from_game),
                     update_survival_hud,
                     update_hotbar,
+                    update_block_outline,
                     edit_blocks,
-                    toggle_crafting,
-                    toggle_inventory_visibility,
-                    craft_recipe_buttons,
+                    update_block_drops.after(edit_blocks),
+                    update_mining_visual.after(edit_blocks),
                     rebuild_dirty_chunks,
                     autosave_world,
                     pause_from_game,
@@ -455,11 +661,21 @@ fn main() {
         .run();
 }
 
+struct WorldScenePlugin;
+
+impl Plugin for WorldScenePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(OnEnter(AppState::LoadingWorld), load_textures)
+            .add_systems(OnEnter(AppState::InGame), setup_game_scene);
+    }
+}
+
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AppState {
     #[default]
     MainMenu,
     WorldSelect,
+    ConfirmDeleteWorld,
     CreateWorld,
     LoadingWorld,
     InGame,
@@ -471,6 +687,12 @@ struct MenuRoot;
 
 #[derive(Component)]
 struct HudRoot;
+
+#[derive(Component)]
+struct ChatBar;
+
+#[derive(Component)]
+struct ChatInputText;
 
 #[derive(Component)]
 struct UiCamera;
@@ -499,8 +721,12 @@ struct MenuAction(MenuCommand);
 #[derive(Clone, Copy)]
 enum MenuCommand {
     Play,
+    PlaySelected,
     Create,
     Back,
+    DeleteSelected,
+    ConfirmDelete,
+    CancelDelete,
     StartWorld,
     Resume,
     SaveAndMenu,
@@ -509,13 +735,29 @@ enum MenuCommand {
 }
 
 #[derive(Component)]
-struct LoadWorldAction(PathBuf);
+struct SelectWorldAction {
+    path: PathBuf,
+    name: String,
+}
+
+#[derive(Component)]
+struct WorldSelectionStatus;
 
 #[derive(Component)]
 struct BlockParticle {
     lifetime: f32,
     max_lifetime: f32,
     velocity: Vec3,
+}
+
+#[derive(Component)]
+struct PlainsAmbience;
+
+#[derive(Component)]
+struct BlockDrop {
+    item: Item,
+    velocity: Vec3,
+    age: f32,
 }
 
 #[derive(Component)]
@@ -539,11 +781,27 @@ impl Default for WorldForm {
     fn default() -> Self {
         Self {
             name: "Mi mundo".into(),
-            seed: "12345".into(),
+            seed: new_world_seed().to_string(),
             focus: WorldField::Name,
             error: None,
         }
     }
+}
+
+fn new_world_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    timestamp
+        ^ (u64::from(std::process::id()).rotate_left(23))
+        ^ SEQUENCE
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 #[derive(Resource, Default)]
@@ -551,6 +809,12 @@ struct PendingWorld {
     save: Option<WorldSave>,
     path: Option<PathBuf>,
     is_new_world: bool,
+}
+
+#[derive(Resource, Default)]
+struct SelectedWorld {
+    path: Option<PathBuf>,
+    name: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -598,6 +862,8 @@ struct WorldSave {
     version: u32,
     name: String,
     seed: u64,
+    #[serde(default = "legacy_terrain_version")]
+    terrain_version: u32,
     #[serde(default = "default_time_of_day_seconds")]
     time_of_day_seconds: f32,
     player_position: [f32; 3],
@@ -609,8 +875,10 @@ struct WorldSave {
     #[serde(default)]
     selected_hotbar_slot: usize,
     inventory: [u32; LEGACY_BLOCK_COUNT],
+    #[serde(default, deserialize_with = "deserialize_inventory_counts")]
+    extra_inventory: Vec<u32>,
     #[serde(default)]
-    extra_inventory: [u32; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+    slot_inventory: Option<Inventory>,
     #[serde(default = "default_health")]
     health: f32,
     #[serde(default = "default_hunger")]
@@ -636,14 +904,61 @@ struct ChunkSave {
     blocks: Vec<u8>,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct WorldData {
     chunks: HashMap<IVec3, Chunk>,
     modified_chunks: HashMap<IVec3, Chunk>,
     dirty: HashSet<IVec3>,
     name: String,
     seed: u64,
+    terrain_version: u32,
     door_states: HashMap<IVec3, DoorState>,
+}
+
+fn legacy_terrain_version() -> u32 {
+    1
+}
+
+fn deserialize_inventory_counts<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CountsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for CountsVisitor {
+        type Value = Vec<u32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("una secuencia de cantidades de objetos")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut counts = Vec::new();
+            while let Some(count) = sequence.next_element()? {
+                counts.push(count);
+            }
+            Ok(counts)
+        }
+    }
+
+    deserializer.deserialize_any(CountsVisitor)
+}
+
+impl Default for WorldData {
+    fn default() -> Self {
+        Self {
+            chunks: HashMap::new(),
+            modified_chunks: HashMap::new(),
+            dirty: HashSet::new(),
+            name: String::new(),
+            seed: 0,
+            terrain_version: TERRAIN_VERSION,
+            door_states: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -654,8 +969,32 @@ struct WorldStorage {
     failed_chunks: HashSet<IVec3>,
     autosave_elapsed: f32,
     retry_elapsed: f32,
+    retry_generation: u64,
     metadata_save_requested: bool,
     status: String,
+}
+
+#[derive(Resource, Default)]
+struct ChunkStreamingState {
+    center: Option<IVec3>,
+    vertical_radius: i32,
+    retry_generation: u64,
+    pending_unloads: Vec<(Entity, IVec3)>,
+    next_unload: usize,
+    pending: Vec<IVec3>,
+    next: usize,
+    chunk_entities: HashMap<IVec3, Entity>,
+}
+
+impl ChunkStreamingState {
+    fn invalidate(&mut self) {
+        self.center = None;
+        self.pending_unloads.clear();
+        self.next_unload = 0;
+        self.pending.clear();
+        self.next = 0;
+        self.chunk_entities.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -721,6 +1060,11 @@ struct Player {
     velocity: Vec3,
     grounded: bool,
     flying: bool,
+    jump_buffer: f32,
+    coyote_time: f32,
+    step_up_remaining: f32,
+    jump_key_down: bool,
+    flight_key_down: bool,
 }
 
 #[derive(Resource, Default)]
@@ -741,39 +1085,43 @@ impl Default for SelectedBlock {
 struct SelectedHotbarSlot(usize);
 
 #[derive(Component)]
-struct HudStatus;
-
-#[derive(Component)]
 struct ExperienceText;
 
-#[derive(Component)]
-struct CraftingPanel;
+#[derive(Component, Clone, Copy)]
+struct SurvivalIcon {
+    kind: SurvivalIconKind,
+    index: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SurvivalIconKind {
+    Health,
+    Hunger,
+}
 
 #[derive(Component)]
-struct CraftingStatus;
+struct ExperienceFill;
 
 #[derive(Component)]
 struct InventoryPanel;
 
-#[derive(Component)]
-struct InventoryGrid;
-
 #[derive(Component, Clone, Copy)]
-struct InventorySlot {
-    block_type: u8,
-    slot_index: usize,
+enum InventoryTarget {
+    Slot(usize),
+    Small(usize),
+    Large(usize),
+    SmallResult,
+    LargeResult,
 }
 
 #[derive(Component)]
-struct InventoryCraftingGrid;
+struct InventoryLabel(InventoryTarget);
 
 #[derive(Component)]
-struct InventoryCraftResult;
+struct InventoryCursorLabel;
 
 #[derive(Component)]
-struct CraftingGridSlot {
-    position: usize,
-}
+struct InventoryGridMode(bool);
 
 #[derive(Component)]
 struct HotbarSlotVisual {
@@ -786,36 +1134,14 @@ struct SurvivalHeartsDisplay;
 #[derive(Component)]
 struct SurvivalHungerDisplay;
 
-#[derive(Component)]
-struct RecipeBookUI;
-
-#[derive(Component, Clone, Copy)]
-struct CraftRecipeButton(CraftRecipe);
-
-#[derive(Clone, Copy)]
-enum CraftRecipe {
-    WoodenPickaxe,
-    WoodenAxe,
-    WoodenShovel,
-    WoodenSword,
-    BerryRation,
-    Arrows,
-    WoodenDoor,
-    Stairs,
-    Slab,
-    Bricks,
-    Planks,
-    Torch,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FoodType {
-    BerryRation,   // saturation: 4
-    Apple,         // saturation: 6
-    Mushroom,      // saturation: 2 (puede ser venenoso)
-    Wheat,         // saturation: 8
-    RawMeat,       // saturation: 3
-    CookedMeat,    // saturation: 8
+    BerryRation, // saturation: 4
+    Apple,       // saturation: 6
+    Mushroom,    // saturation: 2 (puede ser venenoso)
+    Wheat,       // saturation: 8
+    RawMeat,     // saturation: 3
+    CookedMeat,  // saturation: 8
 }
 
 impl FoodType {
@@ -862,7 +1188,12 @@ struct CraftingUi {
     open: bool,
     just_closed: bool,
     inventory_open: bool,
-    inventory_just_opened: bool,
+}
+
+#[derive(Resource, Default)]
+struct ChatState {
+    open: bool,
+    input: String,
 }
 
 #[derive(Resource, Default)]
@@ -873,18 +1204,37 @@ struct CraftedTools {
     sword_durability: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MiningTool {
+    Pickaxe,
+    Axe,
+    Shovel,
+}
+
 #[derive(Clone, Copy)]
-enum SurvivalBarKind {
-    Health,
-    Hunger,
-    Experience,
+struct MiningTarget {
+    position: IVec3,
+    block: u8,
+    tool: Option<MiningTool>,
+    elapsed: f32,
+    duration: f32,
+}
+
+#[derive(Resource, Default)]
+struct MiningState {
+    target: Option<MiningTarget>,
+}
+
+#[derive(Resource, Default)]
+struct MiningVisuals {
+    materials: Vec<Handle<StandardMaterial>>,
 }
 
 #[derive(Component)]
-struct SurvivalBarFill(SurvivalBarKind);
+struct MiningOverlay;
 
 #[derive(Component)]
-struct SurvivalValue(SurvivalBarKind);
+struct BlockOutline;
 
 #[derive(Resource)]
 struct Survival {
@@ -930,47 +1280,16 @@ struct SunCube;
 struct MoonCube;
 
 #[derive(Component)]
+struct SunLighting;
+
+#[derive(Component)]
+struct MoonLighting;
+
+#[derive(Component)]
 struct HotbarSlot(usize);
 
 #[derive(Component)]
 struct HotbarCount(usize);
-
-#[derive(Resource, Default)]
-struct Inventory {
-    counts: [u32; BLOCK_COUNT],
-}
-
-impl Inventory {
-    fn count(&self, block: u8) -> u32 {
-        self.counts.get(block as usize).copied().unwrap_or(0)
-    }
-
-    fn add(&mut self, block: u8) -> Result<(), u8> {
-        if !matches!(
-            block,
-            GRASS | DIRT | STONE | SAND | WOOD | LEAVES | APPLE | WHEAT
-                | MUSHROOM | WOODEN_DOOR | STAIRS | SLAB | BRICKS | PLANKS | TORCH
-        ) {
-            return Err(block);
-        }
-        let Some(count) = self.counts.get_mut(block as usize) else {
-            return Err(block);
-        };
-        *count = count.checked_add(1).ok_or(block)?;
-        Ok(())
-    }
-
-    fn remove(&mut self, block: u8) -> bool {
-        let Some(count) = self.counts.get_mut(block as usize) else {
-            return false;
-        };
-        if *count == 0 {
-            return false;
-        }
-        *count -= 1;
-        true
-    }
-}
 
 fn setup_ui_camera(mut commands: Commands) {
     commands.spawn((
@@ -984,14 +1303,14 @@ fn setup_ui_camera(mut commands: Commands) {
     ));
 }
 
-fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
+fn generate_legacy_chunk(coord: IVec3, seed: u64) -> Chunk {
     let mut chunk = Chunk::new();
     for z in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
             let world_x = coord.x * CHUNK_SIZE + x;
             let world_z = coord.z * CHUNK_SIZE + z;
-            let height = terrain_height(world_x, world_z, seed);
-            let biome = biome_at(world_x, world_z, seed);
+            let height = legacy_terrain_height(world_x, world_z, seed);
+            let biome = legacy_biome_at(world_x, world_z, seed);
             for y in 0..=height {
                 let block = if y == height {
                     biome.surface_block()
@@ -1013,8 +1332,8 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
         for x in -2..CHUNK_SIZE + 2 {
             let world_x = coord.x * CHUNK_SIZE + x;
             let world_z = coord.z * CHUNK_SIZE + z;
-            let height = terrain_height(world_x, world_z, seed);
-            if biome_at(world_x, world_z, seed) != Biome::Forest
+            let height = legacy_terrain_height(world_x, world_z, seed);
+            if legacy_biome_at(world_x, world_z, seed) != Biome::Forest
                 || height > 10
                 || coordinate_hash(world_x, world_z, seed) % 100 >= 20
             {
@@ -1043,7 +1362,9 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
                             if chunk.get(local) == AIR {
                                 chunk.set(local, LEAVES);
                                 // Occasionally spawn apples in leaves
-                                if coordinate_hash(world_x ^ leaf_x, leaf_y, seed ^ 0x5C0F) % 100 < 15 {
+                                if coordinate_hash(world_x ^ leaf_x, leaf_y, seed ^ 0x5C0F) % 100
+                                    < 15
+                                {
                                     chunk.set(local, APPLE);
                                 }
                             }
@@ -1059,10 +1380,10 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
         for x in 0..CHUNK_SIZE {
             let world_x = coord.x * CHUNK_SIZE + x;
             let world_z = coord.z * CHUNK_SIZE + z;
-            if biome_at(world_x, world_z, seed) != Biome::Forest {
+            if legacy_biome_at(world_x, world_z, seed) != Biome::Forest {
                 continue;
             }
-            let height = terrain_height(world_x, world_z, seed);
+            let height = legacy_terrain_height(world_x, world_z, seed);
             if coordinate_hash(world_x, world_z, seed ^ 0xDEAD_BEEF) % 100 < 5 {
                 let mushroom_y = height + 1;
                 if (0..CHUNK_SIZE).contains(&mushroom_y) {
@@ -1077,10 +1398,10 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
         for x in 0..CHUNK_SIZE {
             let world_x = coord.x * CHUNK_SIZE + x;
             let world_z = coord.z * CHUNK_SIZE + z;
-            if biome_at(world_x, world_z, seed) != Biome::Plains {
+            if legacy_biome_at(world_x, world_z, seed) != Biome::Plains {
                 continue;
             }
-            let height = terrain_height(world_x, world_z, seed);
+            let height = legacy_terrain_height(world_x, world_z, seed);
             if coordinate_hash(world_x, world_z, seed ^ 0xBEEF_FACE) % 100 < 8 {
                 let wheat_y = height + 1;
                 if (0..CHUNK_SIZE).contains(&wheat_y) {
@@ -1092,6 +1413,178 @@ fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
     chunk
 }
 
+fn generate_chunk(coord: IVec3, seed: u64) -> Chunk {
+    let generated = world::terrain::generate_chunk_with_palette(
+        coord,
+        seed,
+        world::terrain::TerrainBlockPalette {
+            air: AIR,
+            grass: GRASS,
+            dirt: DIRT,
+            stone: STONE,
+            sand: SAND,
+            wood: WOOD,
+            leaves: LEAVES,
+            apple: APPLE,
+            wheat: WHEAT,
+            mushroom: MUSHROOM,
+            water: WATER,
+            red_flower: RED_FLOWER,
+            yellow_flower: YELLOW_FLOWER,
+            tall_grass: TALL_GRASS,
+            planks: PLANKS,
+        },
+    );
+    Chunk {
+        blocks: generated.blocks,
+    }
+}
+
+fn generate_v2_chunk(coord: IVec3, seed: u64) -> Chunk {
+    const COLUMN_SIDE: usize = (CHUNK_SIZE + 4) as usize;
+    const COLUMN_COUNT: usize = COLUMN_SIDE * COLUMN_SIDE;
+
+    let mut chunk = Chunk::new();
+    let base_y = coord.y * CHUNK_SIZE;
+    let mut surface_columns = [(0, Biome::Plains); COLUMN_COUNT];
+
+    for z in -2..CHUNK_SIZE + 2 {
+        for x in -2..CHUNK_SIZE + 2 {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            let height = terrain_height_v2(world_x, world_z, seed);
+            let biome = biome_at_with_height_v2(world_x, world_z, seed, height);
+            let index = ((z + 2) as usize) * COLUMN_SIDE + (x + 2) as usize;
+            surface_columns[index] = (height, biome);
+        }
+    }
+
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            let column_index = ((z + 2) as usize) * COLUMN_SIDE + (x + 2) as usize;
+            let (height, biome) = surface_columns[column_index];
+
+            for local_y in 0..CHUNK_SIZE {
+                let world_y = base_y + local_y;
+                if !(0..WORLD_HEIGHT).contains(&world_y) {
+                    continue;
+                }
+
+                if world_y <= height {
+                    if world_y < height - 4 && is_cave_v2(world_x, world_y, world_z, seed) {
+                        if world_y <= SEA_LEVEL && world_y > 5 {
+                            chunk.set(IVec3::new(x, local_y, z), WATER);
+                        }
+                        continue;
+                    }
+
+                    let depth = height - world_y;
+                    let block = if depth == 0 {
+                        match biome {
+                            Biome::Plains | Biome::Forest => GRASS,
+                            Biome::Desert | Biome::Beach => SAND,
+                            Biome::Mountain | Biome::Volcano | Biome::Cave => STONE,
+                            Biome::Tundra | Biome::Swamp => STONE,
+                        }
+                    } else if biome == Biome::Desert && depth <= 5 {
+                        SAND
+                    } else if biome == Biome::Beach && depth <= 4 {
+                        SAND
+                    } else if biome == Biome::Mountain && depth > 3 {
+                        STONE
+                    } else if depth <= 4 {
+                        DIRT
+                    } else {
+                        STONE
+                    };
+                    chunk.set(IVec3::new(x, local_y, z), block);
+                } else if world_y <= SEA_LEVEL && height < SEA_LEVEL {
+                    chunk.set(IVec3::new(x, local_y, z), WATER);
+                }
+            }
+        }
+    }
+
+    for z in -2..CHUNK_SIZE + 2 {
+        for x in -2..CHUNK_SIZE + 2 {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            let column_index = ((z + 2) as usize) * COLUMN_SIDE + (x + 2) as usize;
+            let (height, biome) = surface_columns[column_index];
+            if biome != Biome::Forest
+                || height <= SEA_LEVEL
+                || coordinate_hash(world_x, world_z, seed ^ 0xA24B_AED4_963E_E407) % 100 >= 9
+            {
+                continue;
+            }
+
+            let tree_height =
+                4 + (coordinate_hash(world_z, world_x, seed ^ 0xA24B_AED4_963E_E407) % 3) as i32;
+            for trunk_y in height + 1..=height + tree_height {
+                set_generated_block(&mut chunk, x, trunk_y - base_y, z, WOOD);
+            }
+            let crown_y = height + tree_height;
+            for leaf_y in crown_y - 2..=crown_y + 1 {
+                let radius: i32 = if leaf_y == crown_y + 1 { 1 } else { 2 };
+                for leaf_z in -radius..=radius {
+                    for leaf_x in -radius..=radius {
+                        if leaf_y == crown_y + 1 && leaf_x.abs() + leaf_z.abs() > 1 {
+                            continue;
+                        }
+                        let local_x = x + leaf_x;
+                        let local_z = z + leaf_z;
+                        let local_y = leaf_y - base_y;
+                        if !(0..CHUNK_SIZE).contains(&local_x)
+                            || !(0..CHUNK_SIZE).contains(&local_z)
+                            || !(0..CHUNK_SIZE).contains(&local_y)
+                        {
+                            continue;
+                        }
+                        let local = IVec3::new(local_x, local_y, local_z);
+                        if chunk.get(local) == AIR {
+                            let leaf = if coordinate_hash(
+                                world_x ^ leaf_x,
+                                world_z ^ leaf_z,
+                                seed ^ 0x5C0F,
+                            ) % 100
+                                < 4
+                            {
+                                APPLE
+                            } else {
+                                LEAVES
+                            };
+                            chunk.set(local, leaf);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let world_x = coord.x * CHUNK_SIZE + x;
+            let world_z = coord.z * CHUNK_SIZE + z;
+            let column_index = ((z + 2) as usize) * COLUMN_SIDE + (x + 2) as usize;
+            let (height, biome) = surface_columns[column_index];
+            let local_surface_y = height - base_y;
+            let feature = coordinate_hash(world_x, world_z, seed ^ 0xDEAD_BEEF) % 100;
+            let vegetation = match biome {
+                Biome::Forest if feature < 4 => MUSHROOM,
+                Biome::Plains if feature < 5 => WHEAT,
+                _ => AIR,
+            };
+            if vegetation != AIR {
+                set_generated_block(&mut chunk, x, local_surface_y + 1, z, vegetation);
+            }
+        }
+    }
+
+    chunk
+}
+
 fn set_generated_block(chunk: &mut Chunk, x: i32, y: i32, z: i32, block: u8) {
     if (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&y) && (0..CHUNK_SIZE).contains(&z)
     {
@@ -1100,20 +1593,32 @@ fn set_generated_block(chunk: &mut Chunk, x: i32, y: i32, z: i32, block: u8) {
 }
 
 fn load_textures(
-    asset_server: Res<AssetServer>,
     mut texture_assets: ResMut<TextureAssets>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if texture_assets.atlas.is_none() {
-        texture_assets.atlas = Some(asset_server.load("texture_atlas.png"));
-        
+        let mut atlas = Image::new(
+            Extent3d {
+                width: texture_layout::ATLAS_SIZE,
+                height: texture_layout::ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            include_bytes!(concat!(env!("OUT_DIR"), "/block_atlas.rgba")).to_vec(),
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        atlas.sampler = ImageSampler::nearest();
+        texture_assets.atlas = Some(images.add(atlas));
+
         // Create separate materials for water and lava with animation colors
         texture_assets.water_material = Some(materials.add(StandardMaterial {
             base_color: Color::linear_rgb(0.2, 0.5, 0.8),
             alpha_mode: AlphaMode::Blend,
             ..default()
         }));
-        
+
         texture_assets.lava_material = Some(materials.add(StandardMaterial {
             base_color: Color::linear_rgb(1.0, 0.5, 0.0),
             alpha_mode: AlphaMode::Blend,
@@ -1122,17 +1627,155 @@ fn load_textures(
     }
 }
 
-fn wait_for_textures(
-    _asset_server: Res<AssetServer>,
-    texture_assets: Res<TextureAssets>,
-    images: Res<Assets<Image>>,
-) -> bool {
-    // Return true when textures are loaded
-    if let Some(atlas) = &texture_assets.atlas {
-        // Check if the image is loaded
-        images.get(atlas).is_some()
+fn create_mining_materials(
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Vec<Handle<StandardMaterial>> {
+    let segments: [(i32, i32, i32, i32); 16] = [
+        (16, 16, 14, 10),
+        (14, 10, 11, 5),
+        (16, 16, 21, 12),
+        (21, 12, 27, 11),
+        (16, 16, 20, 20),
+        (20, 20, 22, 27),
+        (16, 16, 11, 19),
+        (11, 19, 5, 21),
+        (14, 10, 17, 7),
+        (11, 5, 8, 2),
+        (21, 12, 23, 6),
+        (27, 11, 30, 8),
+        (20, 20, 26, 22),
+        (22, 27, 19, 30),
+        (11, 19, 10, 25),
+        (5, 21, 2, 18),
+    ];
+    (0..MINING_CRACK_STAGES)
+        .map(|stage| {
+            let mut pixels = vec![0_u8; 32 * 32 * 4];
+            for &(mut x, mut y, end_x, end_y) in &segments[..(stage + 1) * 2] {
+                let dx: i32 = (end_x - x).abs();
+                let dy: i32 = -(end_y - y).abs();
+                let step_x = if x < end_x { 1 } else { -1 };
+                let step_y = if y < end_y { 1 } else { -1 };
+                let mut error = dx + dy;
+                loop {
+                    pixels[((y * 32 + x) * 4 + 3) as usize] = 220;
+                    if x == end_x && y == end_y {
+                        break;
+                    }
+                    let twice_error = 2 * error;
+                    if twice_error >= dy {
+                        error += dy;
+                        x += step_x;
+                    }
+                    if twice_error <= dx {
+                        error += dx;
+                        y += step_y;
+                    }
+                }
+            }
+            let mut image = Image::new(
+                Extent3d {
+                    width: 32,
+                    height: 32,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                pixels,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            );
+            image.sampler = ImageSampler::nearest();
+            materials.add(StandardMaterial {
+                base_color_texture: Some(images.add(image)),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            })
+        })
+        .collect()
+}
+
+fn update_mining_visual(
+    mining: Res<MiningState>,
+    visuals: Res<MiningVisuals>,
+    mut overlay: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        With<MiningOverlay>,
+    >,
+) {
+    let Ok((mut transform, mut visibility, mut material)) = overlay.get_single_mut() else {
+        return;
+    };
+    if let Some(target) = mining.target {
+        let stage = ((target.elapsed / target.duration) * MINING_CRACK_STAGES as f32)
+            .floor()
+            .clamp(0.0, (MINING_CRACK_STAGES - 1) as f32) as usize;
+        if let Some(handle) = visuals.materials.get(stage) {
+            transform.translation = target.position.as_vec3() + Vec3::splat(0.5);
+            material.0 = handle.clone();
+            *visibility = Visibility::Visible;
+        } else {
+            error!("Mining overlay material for stage {stage} is missing");
+            *visibility = Visibility::Hidden;
+        }
     } else {
-        false
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn update_block_outline(
+    world: Res<WorldData>,
+    ui: Res<CraftingUi>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera: Query<&Transform, (With<Player>, Without<BlockOutline>)>,
+    mut outline: Query<(&mut Transform, &mut Visibility), (With<BlockOutline>, Without<Player>)>,
+) {
+    let Ok((mut outline_transform, mut visibility)) = outline.get_single_mut() else {
+        return;
+    };
+    if ui.open || ui.inventory_open {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let Ok(window) = windows.get_single() else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let Ok(camera) = camera.get_single() else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    if window.cursor_options.grab_mode != CursorGrabMode::Locked {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let direction = camera.rotation * Vec3::NEG_Z;
+    if let Some((target, _, _)) =
+        raycast_with_distance(&world, camera.translation, direction, REACH)
+    {
+        outline_transform.translation = target.as_vec3() + Vec3::splat(0.5);
+        *visibility = Visibility::Visible;
+    } else {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn reset_mining(
+    mut mining: ResMut<MiningState>,
+    mut overlays: Query<&mut Visibility, With<MiningOverlay>>,
+    mut outlines: Query<&mut Visibility, With<BlockOutline>>,
+) {
+    mining.target = None;
+    for mut visibility in &mut overlays {
+        *visibility = Visibility::Hidden;
+    }
+    for mut visibility in &mut outlines {
+        *visibility = Visibility::Hidden;
     }
 }
 
@@ -1140,9 +1783,10 @@ fn setup_game_scene(
     mut commands: Commands,
     pending: Res<PendingWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut mob_assets: ResMut<MobAssets>,
-    inventory: Res<Inventory>,
+    mut mining_visuals: ResMut<MiningVisuals>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     existing_player: Query<(), With<Player>>,
 ) {
@@ -1165,6 +1809,93 @@ fn setup_game_scene(
             ..default()
         }));
     }
+    if mining_visuals.materials.is_empty() {
+        mining_visuals.materials = create_mining_materials(&mut images, &mut materials);
+    }
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.01, 1.01, 1.01))),
+        MeshMaterial3d(mining_visuals.materials[0].clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        MiningOverlay,
+        GameEntity,
+    ));
+
+    let outline_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let outline_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.015, 0.015, 0.015, 0.9),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    let edge_thickness = 0.025;
+    let edge_offset = 0.51;
+    let edges = [
+        (
+            Vec3::new(1.04, edge_thickness, edge_thickness),
+            Vec3::new(0.0, -edge_offset, -edge_offset),
+        ),
+        (
+            Vec3::new(1.04, edge_thickness, edge_thickness),
+            Vec3::new(0.0, -edge_offset, edge_offset),
+        ),
+        (
+            Vec3::new(1.04, edge_thickness, edge_thickness),
+            Vec3::new(0.0, edge_offset, -edge_offset),
+        ),
+        (
+            Vec3::new(1.04, edge_thickness, edge_thickness),
+            Vec3::new(0.0, edge_offset, edge_offset),
+        ),
+        (
+            Vec3::new(edge_thickness, 1.04, edge_thickness),
+            Vec3::new(-edge_offset, 0.0, -edge_offset),
+        ),
+        (
+            Vec3::new(edge_thickness, 1.04, edge_thickness),
+            Vec3::new(-edge_offset, 0.0, edge_offset),
+        ),
+        (
+            Vec3::new(edge_thickness, 1.04, edge_thickness),
+            Vec3::new(edge_offset, 0.0, -edge_offset),
+        ),
+        (
+            Vec3::new(edge_thickness, 1.04, edge_thickness),
+            Vec3::new(edge_offset, 0.0, edge_offset),
+        ),
+        (
+            Vec3::new(edge_thickness, edge_thickness, 1.04),
+            Vec3::new(-edge_offset, -edge_offset, 0.0),
+        ),
+        (
+            Vec3::new(edge_thickness, edge_thickness, 1.04),
+            Vec3::new(-edge_offset, edge_offset, 0.0),
+        ),
+        (
+            Vec3::new(edge_thickness, edge_thickness, 1.04),
+            Vec3::new(edge_offset, -edge_offset, 0.0),
+        ),
+        (
+            Vec3::new(edge_thickness, edge_thickness, 1.04),
+            Vec3::new(edge_offset, edge_offset, 0.0),
+        ),
+    ];
+    commands
+        .spawn((
+            Transform::default(),
+            Visibility::Hidden,
+            BlockOutline,
+            GameEntity,
+        ))
+        .with_children(|children| {
+            for (scale, translation) in edges {
+                children.spawn((
+                    Mesh3d(outline_mesh.clone()),
+                    MeshMaterial3d(outline_material.clone()),
+                    Transform::from_translation(translation).with_scale(scale),
+                ));
+            }
+        });
 
     let (position, yaw, pitch) =
         pending
@@ -1187,6 +1918,11 @@ fn setup_game_scene(
             velocity: Vec3::ZERO,
             grounded: false,
             flying: false,
+            jump_buffer: 0.0,
+            coyote_time: 0.0,
+            step_up_remaining: 0.0,
+            jump_key_down: false,
+            flight_key_down: false,
         },
     ));
 
@@ -1196,11 +1932,23 @@ fn setup_game_scene(
     }
     commands.spawn((
         DirectionalLight {
-            illuminance: 12_000.0,
+            illuminance: 3_000.0,
             shadows_enabled: false,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, -0.5, 0.0)),
+        SunLighting,
+        GameEntity,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 0.0,
+            color: Color::srgb(0.48, 0.62, 1.0),
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::default(),
+        MoonLighting,
         GameEntity,
     ));
     let sky_material = materials.add(StandardMaterial {
@@ -1259,7 +2007,7 @@ fn setup_game_scene(
         GameEntity,
     ));
     setup_hud(&mut commands);
-    setup_inventory_ui(&mut commands, &inventory);
+    setup_slot_inventory_ui(&mut commands);
 }
 
 fn advance_day_night(time: Res<Time>, mut cycle: ResMut<DayNightCycle>) {
@@ -1272,25 +2020,42 @@ fn advance_day_night(time: Res<Time>, mut cycle: ResMut<DayNightCycle>) {
 
 fn update_day_night_lighting(
     cycle: Res<DayNightCycle>,
-    mut sun: Query<(&mut Transform, &mut DirectionalLight)>,
+    mut sun: Query<
+        (&mut Transform, &mut DirectionalLight),
+        (With<SunLighting>, Without<MoonLighting>),
+    >,
+    mut moon: Query<
+        (&mut Transform, &mut DirectionalLight),
+        (With<MoonLighting>, Without<SunLighting>),
+    >,
     mut ambient: ResMut<AmbientLight>,
 ) {
-    let Ok((mut transform, mut light)) = sun.get_single_mut() else {
-        return;
+    let (elevation, daylight) = sun_position_and_daylight(cycle.time_of_day_seconds);
+    let sunlight = if elevation > 0.0 {
+        smoothstep(0.0, 0.15, elevation)
+    } else {
+        0.0
     };
-    let (_, daylight) = sun_position_and_daylight(cycle.time_of_day_seconds);
-    let direction = -sun_direction(cycle.time_of_day_seconds);
-    transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
+    let sun_direction = sun_direction(cycle.time_of_day_seconds);
 
-    let twilight = (1.0 - daylight).clamp(0.0, 1.0);
-    light.illuminance = 150.0 + daylight * 11_850.0;
-    light.color = Color::srgb(1.0, 0.62 + daylight * 0.38, 0.42 + daylight * 0.58);
+    if let Ok((mut transform, mut light)) = sun.get_single_mut() {
+        transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -sun_direction);
+        light.illuminance = sunlight * 3_000.0;
+        light.color = Color::srgb(1.0, 0.62 + daylight * 0.38, 0.42 + daylight * 0.58);
+    }
+
+    if let Ok((mut transform, mut light)) = moon.get_single_mut() {
+        transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, sun_direction);
+        light.illuminance = (1.0 - sunlight) * 160.0;
+        light.color = Color::srgb(0.48, 0.62, 1.0);
+    }
+
     ambient.color = Color::srgb(
-        0.16 + daylight * 0.48,
-        0.20 + daylight * 0.52,
-        0.36 + daylight * 0.44,
+        0.62 + sunlight * 0.16,
+        0.65 + sunlight * 0.15,
+        0.70 + sunlight * 0.12,
     );
-    ambient.brightness = 20.0 + daylight * 180.0 + twilight * 8.0;
+    ambient.brightness = 350.0 + sunlight * 700.0;
 }
 
 fn update_sky(
@@ -1663,7 +2428,7 @@ fn setup_main_menu(mut commands: Commands) {
         });
 }
 
-fn setup_world_select(mut commands: Commands) {
+fn setup_world_select(mut commands: Commands, mut selected: ResMut<SelectedWorld>) {
     let worlds = match list_saved_worlds() {
         Ok(worlds) => worlds,
         Err(error) => {
@@ -1671,6 +2436,20 @@ fn setup_world_select(mut commands: Commands) {
             Vec::new()
         }
     };
+
+    if selected
+        .path
+        .as_ref()
+        .is_some_and(|path| !worlds.iter().any(|(_, world_path)| world_path == path))
+    {
+        *selected = SelectedWorld::default();
+    }
+
+    let selected_label = selected
+        .name
+        .as_ref()
+        .map(|name| format!("Seleccionado: {name}"))
+        .unwrap_or_else(|| "Selecciona un mundo".to_string());
 
     commands
         .spawn((
@@ -1700,6 +2479,7 @@ fn setup_world_select(mut commands: Commands) {
                 ));
             }
             for (name, path) in worlds {
+                let is_selected = selected.path.as_ref() == Some(&path);
                 root.spawn((
                     Button,
                     Node {
@@ -1709,8 +2489,15 @@ fn setup_world_select(mut commands: Commands) {
                         justify_content: JustifyContent::Center,
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                    LoadWorldAction(path),
+                    BackgroundColor(if is_selected {
+                        Color::srgb(0.18, 0.36, 0.29)
+                    } else {
+                        Color::srgb(0.12, 0.2, 0.25)
+                    }),
+                    SelectWorldAction {
+                        path,
+                        name: name.clone(),
+                    },
                 ))
                 .with_child((
                     Text::new(name),
@@ -1719,23 +2506,82 @@ fn setup_world_select(mut commands: Commands) {
                 ));
             }
             root.spawn((
-                Button,
-                Node {
-                    width: Val::Px(220.0),
-                    height: Val::Px(48.0),
-                    margin: UiRect::top(Val::Px(12.0)),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.18, 0.2, 0.25)),
-                MenuAction(MenuCommand::Back),
-            ))
-            .with_child((
-                Text::new("Volver"),
-                TextFont::from_font_size(20.0),
+                Text::new(selected_label),
+                TextFont::from_font_size(16.0),
+                TextColor(Color::srgb(0.72, 0.86, 0.8)),
+                WorldSelectionStatus,
+            ));
+            for (label, action) in [
+                ("Jugar al mundo seleccionado", MenuCommand::PlaySelected),
+                ("Crear nuevo mundo", MenuCommand::Create),
+                ("Eliminar mundo", MenuCommand::DeleteSelected),
+                ("Cancelar", MenuCommand::Back),
+            ] {
+                root.spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(360.0),
+                        height: Val::Px(44.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                    MenuAction(action),
+                ))
+                .with_child((
+                    Text::new(label),
+                    TextFont::from_font_size(18.0),
+                    TextColor(Color::WHITE),
+                ));
+            }
+        });
+}
+
+fn setup_delete_world_confirmation(mut commands: Commands, selected: Res<SelectedWorld>) {
+    let name = selected.name.as_deref().unwrap_or("mundo seleccionado");
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(16.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.035, 0.055, 0.09)),
+            MenuRoot,
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Text::new(format!("¿Eliminar el mundo ‘{name}’ permanentemente?")),
+                TextFont::from_font_size(24.0),
                 TextColor(Color::WHITE),
             ));
+            for (label, action) in [
+                ("Eliminar", MenuCommand::ConfirmDelete),
+                ("Cancelar", MenuCommand::CancelDelete),
+            ] {
+                root.spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(280.0),
+                        height: Val::Px(48.0),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
+                    MenuAction(action),
+                ))
+                .with_child((
+                    Text::new(label),
+                    TextFont::from_font_size(20.0),
+                    TextColor(Color::WHITE),
+                ));
+            }
         });
 }
 
@@ -1981,10 +2827,12 @@ fn cleanup_game_scene(
     mut survival: ResMut<Survival>,
     mut crafted_tools: ResMut<CraftedTools>,
     mut crafting_ui: ResMut<CraftingUi>,
+    mut chat: ResMut<ChatState>,
     mut pending: ResMut<PendingWorld>,
     mut selected: ResMut<SelectedBlock>,
     mut selected_slot: ResMut<SelectedHotbarSlot>,
     mut storage: ResMut<WorldStorage>,
+    mut streaming: ResMut<ChunkStreamingState>,
     mut mob_population: ResMut<MobPopulation>,
 ) {
     for entity in &entities {
@@ -1994,42 +2842,57 @@ fn cleanup_game_scene(
     world.modified_chunks.clear();
     world.dirty.clear();
     world.name.clear();
-    inventory.counts = [0; BLOCK_COUNT];
+    *inventory = Inventory::default();
     *survival = Survival::default();
     *crafted_tools = CraftedTools::default();
     *crafting_ui = CraftingUi::default();
+    *chat = ChatState::default();
     selected.0 = GRASS;
     selected_slot.0 = 0;
     pending.save = None;
     pending.path = None;
     pending.is_new_world = false;
     *storage = WorldStorage::default();
+    streaming.invalidate();
     *mob_population = MobPopulation::default();
 }
 
 fn block_type_name(block_type: u8) -> &'static str {
-    match block_type {
-        AIR => "Aire",
-        GRASS => "Hierba",
-        DIRT => "Tierra",
-        STONE => "Piedra",
-        SAND => "Arena",
-        WOOD => "Madera",
-        LEAVES => "Hojas",
-        APPLE => "Manzana",
-        WHEAT => "Trigo",
-        MUSHROOM => "Hongo",
-        WOODEN_DOOR => "Puerta",
-        STAIRS => "Escaleras",
-        SLAB => "Losa",
-        BRICKS => "Ladrillo",
-        PLANKS => "Tablones",
-        TORCH => "Antorcha",
-        _ => "Desconocido",
+    block_definition(block_type).name_es
+}
+
+fn item_name(item: Item) -> &'static str {
+    match item {
+        Item::Block(block) => block_type_name(block),
+        _ => item.definition().name,
     }
 }
 
-fn setup_inventory_ui(commands: &mut Commands, inventory: &Inventory) {
+fn spawn_inventory_slot(parent: &mut ChildBuilder, target: InventoryTarget) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(72.0),
+                height: Val::Px(52.0),
+                border: UiRect::all(Val::Px(1.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.15, 0.17, 0.19)),
+            BorderColor(Color::srgb(0.55, 0.55, 0.55)),
+            target,
+        ))
+        .with_child((
+            Text::new(""),
+            TextFont::from_font_size(12.0),
+            TextColor(Color::WHITE),
+            InventoryLabel(target),
+        ));
+}
+
+fn setup_slot_inventory_ui(commands: &mut Commands) {
     commands
         .spawn((
             Node {
@@ -2041,169 +2904,245 @@ fn setup_inventory_ui(commands: &mut Commands, inventory: &Inventory) {
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            GlobalZIndex(100),
             InventoryPanel,
             GameEntity,
         ))
-        .with_children(|panel| {
-            panel
-                .spawn((
-                    Node {
-                        width: Val::Px(880.0),
-                        height: Val::Px(706.0),
-                        flex_direction: FlexDirection::Column,
-                        padding: UiRect::all(Val::Px(20.0)),
-                        row_gap: Val::Px(20.0),
-                        border: UiRect::all(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.12, 0.12, 0.12)),
-                    BorderColor(Color::srgb(0.5, 0.5, 0.5)),
-                ))
-                .with_children(|main| {
-                    main.spawn((
-                        Text::new("Inventario (E para cerrar)"),
-                        TextFont::from_font_size(24.0),
-                        TextColor(Color::WHITE),
-                    ));
-
-                    main.spawn(Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(200.0),
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(20.0),
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    width: Val::Px(750.0),
+                    padding: UiRect::all(Val::Px(16.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.10, 0.12, 0.15)),
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new("Inventario [E] | Mesa 3x3 [C] | Cerrar [Esc]"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(Color::WHITE),
+                ));
+                panel.spawn((
+                    Text::new("Izquierdo: mover / combinar | Derecho: dividir / colocar uno"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::WHITE),
+                ));
+                panel.spawn((
+                    Text::new("Recetas: consulta la guia en README.md"),
+                    TextFont::from_font_size(13.0),
+                    TextColor(Color::WHITE),
+                ));
+                panel.spawn((
+                    Text::new("Cursor: vacio"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::WHITE),
+                    InventoryCursorLabel,
+                ));
+                for (large, width) in [(false, 2), (true, 3)] {
+                    panel
+                        .spawn((
+                            Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(12.0),
+                                ..default()
+                            },
+                            InventoryGridMode(large),
+                        ))
+                        .with_children(|row| {
+                            row.spawn(Node {
+                                width: Val::Px(width as f32 * 76.0),
+                                flex_wrap: FlexWrap::Wrap,
+                                column_gap: Val::Px(4.0),
+                                row_gap: Val::Px(4.0),
+                                ..default()
+                            })
+                            .with_children(|grid| {
+                                for index in 0..width * width {
+                                    spawn_inventory_slot(
+                                        grid,
+                                        if large {
+                                            InventoryTarget::Large(index)
+                                        } else {
+                                            InventoryTarget::Small(index)
+                                        },
+                                    );
+                                }
+                            });
+                            row.spawn((
+                                Text::new("->"),
+                                TextFont::from_font_size(24.0),
+                                TextColor(Color::WHITE),
+                            ));
+                            spawn_inventory_slot(
+                                row,
+                                if large {
+                                    InventoryTarget::LargeResult
+                                } else {
+                                    InventoryTarget::SmallResult
+                                },
+                            );
+                        });
+                }
+                panel.spawn((
+                    Text::new("Espacios 1-9: barra rapida"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::WHITE),
+                ));
+                panel
+                    .spawn(Node {
+                        width: Val::Px(684.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        column_gap: Val::Px(4.0),
+                        row_gap: Val::Px(4.0),
                         ..default()
                     })
-                    .with_children(|top_row| {
-                        top_row
-                            .spawn((
-                                Node {
-                                    width: Val::Px(180.0),
-                                    height: Val::Percent(100.0),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(10.0),
-                                    padding: UiRect::all(Val::Px(10.0)),
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.15, 0.15, 0.15)),
-                                BorderColor(Color::srgb(0.4, 0.4, 0.4)),
-                                InventoryCraftingGrid,
-                            ))
-                            .with_children(|craft| {
-                                craft.spawn((
-                                    Text::new("Crafteo 2×2"),
-                                    TextFont::from_font_size(14.0),
-                                    TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                                ));
-
-                                craft.spawn(Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Px(100.0),
-                                    flex_wrap: FlexWrap::Wrap,
-                                    column_gap: Val::Px(5.0),
-                                    row_gap: Val::Px(5.0),
-                                    ..default()
-                                })
-                                .with_children(|slots| {
-                                    for i in 0..4 {
-                                        slots.spawn((
-                                            Node {
-                                                width: Val::Px(45.0),
-                                                height: Val::Px(45.0),
-                                                border: UiRect::all(Val::Px(1.0)),
-                                                align_items: AlignItems::Center,
-                                                justify_content: JustifyContent::Center,
-                                                ..default()
-                                            },
-                                            BorderColor(Color::srgb(0.4, 0.4, 0.4)),
-                                            BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
-                                            CraftingGridSlot { position: i },
-                                        ));
-                                    }
-                                });
-                            });
-
-                        top_row.spawn(Node {
-                            width: Val::Px(40.0),
-                            height: Val::Percent(100.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        })
-                        .with_child((
-                            Text::new("→"),
-                            TextFont::from_font_size(30.0),
-                            TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                        ));
-
-                        top_row
-                            .spawn((
-                                Node {
-                                    width: Val::Px(100.0),
-                                    height: Val::Percent(100.0),
-                                    flex_direction: FlexDirection::Column,
-                                    align_items: AlignItems::Center,
-                                    justify_content: JustifyContent::Center,
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    ..default()
-                                },
-                                BorderColor(Color::srgb(0.4, 0.4, 0.4)),
-                                BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
-                                InventoryCraftResult,
-                            ))
-                            .with_child((
-                                Text::new("Resultado"),
-                                TextFont::from_font_size(12.0),
-                                TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                            ));
-
-                        top_row.spawn(Node {
-                            flex_grow: 1.0,
-                            ..default()
-                        });
-                    });
-
-                    main.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(330.0),
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(5.0),
-                            overflow: Overflow::clip_y(),
-                            padding: UiRect::all(Val::Px(10.0)),
-                            border: UiRect::all(Val::Px(1.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.08, 0.08, 0.08)),
-                        BorderColor(Color::srgb(0.4, 0.4, 0.4)),
-                        InventoryGrid,
-                    ))
                     .with_children(|grid| {
-                        for (idx, count) in inventory.counts.iter().enumerate() {
-                            if *count > 0 {
-                                let block_name = block_type_name(idx as u8);
-                                grid.spawn(Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Px(40.0),
-                                    flex_direction: FlexDirection::Row,
-                                    align_items: AlignItems::Center,
-                                    padding: UiRect::all(Val::Px(5.0)),
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    ..default()
-                                })
-                                .with_children(|slot| {
-                                    slot.spawn((
-                                        Text::new(format!("{}: {}", block_name, count)),
-                                        TextFont::from_font_size(14.0),
-                                        TextColor(Color::WHITE),
-                                    ));
-                                });
-                            }
+                        for index in 0..INVENTORY_SIZE {
+                            spawn_inventory_slot(grid, InventoryTarget::Slot(index));
                         }
                     });
-                });
+            });
         });
+}
+
+fn inventory_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ui: ResMut<CraftingUi>,
+    chat: Res<ChatState>,
+    mut panel: Query<&mut Node, With<InventoryPanel>>,
+    mut modes: Query<(&InventoryGridMode, &mut Node), Without<InventoryPanel>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    ui.just_closed = false;
+    if chat.open {
+        return;
+    }
+    let active = ui.open || ui.inventory_open;
+    let mode = if keys.just_pressed(KeyCode::Escape) && active {
+        None
+    } else if keys.just_pressed(KeyCode::KeyE) {
+        if ui.inventory_open {
+            None
+        } else {
+            Some(false)
+        }
+    } else if keys.just_pressed(KeyCode::KeyC) {
+        if ui.open {
+            None
+        } else {
+            Some(true)
+        }
+    } else {
+        return;
+    };
+    let Ok(mut window) = windows.get_single_mut() else {
+        error!("Primary window is missing while toggling inventory");
+        return;
+    };
+    let Ok(mut root) = panel.get_single_mut() else {
+        error!("Inventory panel is missing");
+        return;
+    };
+    ui.open = mode == Some(true);
+    ui.inventory_open = mode == Some(false);
+    ui.just_closed = active && mode.is_none();
+    root.display = if mode.is_some() {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for (grid, mut node) in &mut modes {
+        node.display = if mode == Some(grid.0) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    window.cursor_options.grab_mode = if mode.is_some() {
+        CursorGrabMode::None
+    } else {
+        CursorGrabMode::Locked
+    };
+    window.cursor_options.visible = mode.is_some();
+}
+
+fn inventory_clicks(
+    mouse: Res<ButtonInput<MouseButton>>,
+    ui: Res<CraftingUi>,
+    mut inventory: ResMut<Inventory>,
+    buttons: Query<(&Interaction, &InventoryTarget)>,
+) {
+    if !ui.open && !ui.inventory_open {
+        return;
+    }
+    let right = mouse.just_pressed(MouseButton::Right);
+    if !right && !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some((_, target)) = buttons.iter().find(|(interaction, target)| {
+        **interaction != Interaction::None
+            && match target {
+                InventoryTarget::Small(_) | InventoryTarget::SmallResult => ui.inventory_open,
+                InventoryTarget::Large(_) | InventoryTarget::LargeResult => ui.open,
+                InventoryTarget::Slot(_) => true,
+            }
+    }) else {
+        return;
+    };
+    let inventory = &mut *inventory;
+    match *target {
+        InventoryTarget::Slot(index) => {
+            item_inventory::click_slot(&mut inventory.slots[index], &mut inventory.cursor, right)
+        }
+        InventoryTarget::Small(index) => item_inventory::click_slot(
+            &mut inventory.small_grid[index],
+            &mut inventory.cursor,
+            right,
+        ),
+        InventoryTarget::Large(index) => item_inventory::click_slot(
+            &mut inventory.large_grid[index],
+            &mut inventory.cursor,
+            right,
+        ),
+        InventoryTarget::SmallResult => {
+            item_inventory::craft(&mut inventory.small_grid, 2, &mut inventory.cursor);
+        }
+        InventoryTarget::LargeResult => {
+            item_inventory::craft(&mut inventory.large_grid, 3, &mut inventory.cursor);
+        }
+    }
+}
+
+fn update_inventory_ui(
+    inventory: Res<Inventory>,
+    mut labels: Query<(&InventoryLabel, &mut Text), Without<InventoryCursorLabel>>,
+    mut cursor: Query<&mut Text, With<InventoryCursorLabel>>,
+) {
+    if !inventory.is_changed() {
+        return;
+    }
+    for (label, mut text) in &mut labels {
+        let stack = match label.0 {
+            InventoryTarget::Slot(index) => inventory.slots[index],
+            InventoryTarget::Small(index) => inventory.small_grid[index],
+            InventoryTarget::Large(index) => inventory.large_grid[index],
+            InventoryTarget::SmallResult => item_inventory::recipe(&inventory.small_grid, 2),
+            InventoryTarget::LargeResult => item_inventory::recipe(&inventory.large_grid, 3),
+        };
+        text.0 = stack.map_or_else(String::new, |stack| {
+            format!("{}\nx{}", item_name(stack.item), stack.count)
+        });
+    }
+    for mut text in &mut cursor {
+        text.0 = inventory.cursor.map_or_else(
+            || "Cursor: vacio".into(),
+            |stack| format!("Cursor: {} x{}", item_name(stack.item), stack.count),
+        );
+    }
 }
 
 fn setup_hud(commands: &mut Commands) {
@@ -2227,432 +3166,121 @@ fn setup_hud(commands: &mut Commands) {
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    right: Val::Px(20.0),
-                    top: Val::Px(18.0),
+                    left: Val::Px(20.0),
+                    bottom: Val::Px(154.0),
+                    width: Val::Px(620.0),
+                    min_height: Val::Px(42.0),
                     padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                    align_items: AlignItems::Center,
+                    display: Display::None,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.72)),
-                HudStatus,
-                Text::new("CAMINAR  [F] VUELO\nBloque: Césped [1]\n[ESC] pausa"),
-                TextFont::from_font_size(16.0),
-                TextColor(Color::srgb(0.94, 0.96, 1.0)),
+                BackgroundColor(Color::srgba(0.02, 0.02, 0.02, 0.78)),
+                GlobalZIndex(50),
+                ChatBar,
+            ))
+            .with_child((
+                Text::new(""),
+                TextFont::from_font_size(18.0),
+                TextColor(Color::WHITE),
+                ChatInputText,
             ));
 
             root.spawn(Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(20.0),
-                bottom: Val::Px(24.0),
-                width: Val::Px(220.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(5.0),
-                padding: UiRect::all(Val::Px(8.0)),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                bottom: Val::Px(92.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
                 ..default()
             })
-            .insert(BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.72)))
-            .with_children(|panel| {
-                for (label, kind, color) in [
-                    (
-                        "Vida",
-                        SurvivalBarKind::Health,
-                        Color::srgb(0.82, 0.18, 0.2),
-                    ),
-                    (
-                        "Hambre",
-                        SurvivalBarKind::Hunger,
-                        Color::srgb(0.9, 0.62, 0.16),
-                    ),
-                    (
-                        "Experiencia",
-                        SurvivalBarKind::Experience,
-                        Color::srgb(0.25, 0.75, 0.32),
-                    ),
-                ] {
-                    if matches!(kind, SurvivalBarKind::Experience) {
-                        panel.spawn((
-                            Text::new("Nivel 0 · 0/10 XP"),
-                            TextFont::from_font_size(14.0),
-                            TextColor(Color::WHITE),
-                            ExperienceText,
-                        ));
-                    } else {
-                        panel.spawn((
-                            Text::new(label),
-                            TextFont::from_font_size(14.0),
-                            TextColor(Color::WHITE),
-                            SurvivalValue(kind),
-                        ));
-                    }
-                    panel
+            .with_children(|hud| {
+                hud.spawn(Node {
+                    width: Val::Px(548.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(2.0),
+                    ..default()
+                })
+                .with_children(|center| {
+                    center
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            for (kind, symbol, color) in
+                                [(SurvivalIconKind::Health, "♥", Color::srgb(0.92, 0.16, 0.18))]
+                            {
+                                row.spawn(Node {
+                                    width: Val::Px(218.0),
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: Val::Px(2.0),
+                                    ..default()
+                                })
+                                .with_children(|icons| {
+                                    for index in 0..10 {
+                                        icons.spawn((
+                                            Text::new(symbol),
+                                            TextFont::from_font_size(21.0),
+                                            TextColor(color),
+                                            SurvivalIcon { kind, index },
+                                        ));
+                                    }
+                                });
+                            }
+
+                            row.spawn(Node {
+                                width: Val::Px(218.0),
+                                flex_direction: FlexDirection::Row,
+                                justify_content: JustifyContent::FlexEnd,
+                                column_gap: Val::Px(2.0),
+                                ..default()
+                            })
+                            .with_children(|icons| {
+                                for index in 0..10 {
+                                    icons.spawn((
+                                        Text::new("●"),
+                                        TextFont::from_font_size(19.0),
+                                        TextColor(Color::srgb(0.86, 0.58, 0.20)),
+                                        SurvivalIcon {
+                                            kind: SurvivalIconKind::Hunger,
+                                            index,
+                                        },
+                                    ));
+                                }
+                            });
+                        });
+
+                    center.spawn((
+                        Text::new("0"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::srgb(0.45, 1.0, 0.30)),
+                        ExperienceText,
+                    ));
+
+                    center
                         .spawn((
                             Node {
                                 width: Val::Percent(100.0),
-                                height: Val::Px(12.0),
+                                height: Val::Px(6.0),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.15, 0.17, 0.2, 0.95)),
+                            BackgroundColor(Color::srgba(0.05, 0.08, 0.04, 0.95)),
                         ))
                         .with_child((
                             Node {
-                                width: Val::Percent(100.0),
+                                width: Val::Percent(0.0),
                                 height: Val::Percent(100.0),
                                 ..default()
                             },
-                            BackgroundColor(color),
-                            SurvivalBarFill(kind),
+                            BackgroundColor(Color::srgb(0.35, 0.90, 0.12)),
+                            ExperienceFill,
                         ));
-                }
-            });
-
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: Val::Px(440.0),
-                    padding: UiRect::all(Val::Px(20.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(12.0),
-                    display: Display::None,
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.035, 0.055, 0.09, 0.96)),
-                CraftingPanel,
-            ))
-            .with_children(|panel| {
-                panel.spawn((
-                    Text::new("Mesa de crafteo  [C / Esc]"),
-                    TextFont::from_font_size(26.0),
-                    TextColor(Color::WHITE),
-                ));
-                panel.spawn((
-                    Text::new("Pico de madera  ·  3 madera + 2 piedra"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::WoodenPickaxe),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar pico (64 usos)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Hacha de madera  ·  2 madera + 1 piedra"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::WoodenAxe),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar hacha (64 usos)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Pala de madera  ·  2 madera + 1 piedra"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::WoodenShovel),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar pala (64 usos, 2x en arena/tierra)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Espada de madera  ·  2 madera + 2 piedra"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::WoodenSword),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar espada (32 usos, +daño a mobs)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Ración de bayas  ·  3 hojas + 1 madera"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::BerryRation),
-                    ))
-                    .with_child((
-                        Text::new("Preparar ración (+1 comida)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Flechas (x5)  ·  2 hojas + 1 arena"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Arrows),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar 5 flechas"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                panel.spawn((
-                    Text::new("Pala: 2x rápido en arena/tierra. Espada: +1 daño, sin romper bloques. Flechas: múltiples disparos."),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::srgb(0.75, 0.8, 0.86)),
-                ));
-                
-                // Feature 5: Structures
-                panel.spawn((
-                    Text::new(""),
-                    TextFont::from_font_size(5.0),
-                    TextColor(Color::srgb(0.5, 0.5, 0.5)),
-                ));
-                panel.spawn((
-                    Text::new("═══ ESTRUCTURAS (Feature 5) ═══"),
-                    TextFont::from_font_size(16.0),
-                    TextColor(Color::srgb(0.78, 0.90, 1.0)),
-                ));
-                
-                panel.spawn((
-                    Text::new("Puerta de madera  ·  6 madera  →  3 puertas"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::WoodenDoor),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar puertas (click derecho = abrir/cerrar)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                    
-                panel.spawn((
-                    Text::new("Escaleras de madera  ·  6 madera  →  4 bloques"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Stairs),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar escaleras (subida vertical)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                    
-                panel.spawn((
-                    Text::new("Losas de madera  ·  3 madera  →  6 losas"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Slab),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar losas (media altura, apilables)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                    
-                panel.spawn((
-                    Text::new("Ladrillo de piedra  ·  4 piedra  →  4 ladrillos"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Bricks),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar ladrillos"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-                    
-                panel.spawn((
-                    Text::new("Tablones de madera  ·  1 madera  →  4 tablones"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Planks),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar tablones (material versátil)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-
-                panel.spawn((
-                    Text::new("Puertas bloqueadas si están cerradas. Escaleras/losas aún en desarrollo (renderización parcial)."),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::srgb(0.75, 0.8, 0.86)),
-                ));
-                
-                // Feature 6: Lighting
-                panel.spawn((
-                    Text::new(""),
-                    TextFont::from_font_size(5.0),
-                    TextColor(Color::srgb(0.5, 0.5, 0.5)),
-                ));
-                panel.spawn((
-                    Text::new("═══ ILUMINACIÓN (Feature 6) ═══"),
-                    TextFont::from_font_size(16.0),
-                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
-                ));
-                
-                panel.spawn((
-                    Text::new("Antorcha  ·  1 madera + 1 piedra  →  8 antorchas"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(Color::srgb(0.88, 0.9, 0.94)),
-                ));
-                panel
-                    .spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(42.0),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.12, 0.2, 0.25)),
-                        CraftRecipeButton(CraftRecipe::Torch),
-                    ))
-                    .with_child((
-                        Text::new("Fabricar antorchas (radio 8 bloques, mobs spawnan en oscuridad)"),
-                        TextFont::from_font_size(17.0),
-                        TextColor(Color::WHITE),
-                    ));
-
-                panel.spawn((
-                    Text::new("Antorchas iluminan zonas oscuras previniendo spawn de mobs hostiles. Colocar cerca de refugios."),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::srgb(0.75, 0.8, 0.86)),
-                ));
-                
-                panel.spawn((
-                    Text::new(""),
-                    TextFont::from_font_size(15.0),
-                    TextColor(Color::srgb(1.0, 0.78, 0.35)),
-                    CraftingStatus,
-                ));
+                });
             });
 
             root.spawn((
@@ -2666,16 +3294,7 @@ fn setup_hud(commands: &mut Commands) {
                 BackgroundColor(Color::srgba(0.02, 0.03, 0.05, 0.72)),
             ))
             .with_children(|hotbar| {
-                for (slot_index, &block) in HOTBAR_BLOCKS.iter().enumerate().take(HOTBAR_SLOT_COUNT) {
-                    let color = match block {
-                        GRASS => Color::srgb(0.25, 0.62, 0.22),
-                        DIRT => Color::srgb(0.43, 0.30, 0.18),
-                        STONE => Color::srgb(0.48, 0.50, 0.53),
-                        SAND => Color::srgb(0.82, 0.72, 0.45),
-                        WOOD => Color::srgb(0.48, 0.29, 0.12),
-                        LEAVES => Color::srgb(0.16, 0.48, 0.19),
-                        _ => Color::srgba(0.12, 0.14, 0.18, 0.9),
-                    };
+                for slot_index in 0..HOTBAR_SLOT_COUNT {
                     hotbar
                         .spawn((
                             Node {
@@ -2687,7 +3306,7 @@ fn setup_hud(commands: &mut Commands) {
                                 padding: UiRect::all(Val::Px(4.0)),
                                 ..default()
                             },
-                            BackgroundColor(color),
+                            BackgroundColor(Color::srgba(0.12, 0.14, 0.18, 0.9)),
                             BorderColor(if slot_index == 0 {
                                 Color::WHITE
                             } else {
@@ -2697,24 +3316,28 @@ fn setup_hud(commands: &mut Commands) {
                         ))
                         .with_children(|slot| {
                             slot.spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px(4.0),
+                                    top: Val::Px(2.0),
+                                    ..default()
+                                },
                                 Text::new((slot_index + 1).to_string()),
-                                TextFont::from_font_size(16.0),
+                                TextFont::from_font_size(12.0),
                                 TextColor(Color::WHITE),
                             ));
-                            if block != AIR {
-                                slot.spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        right: Val::Px(4.0),
-                                        bottom: Val::Px(2.0),
-                                        ..default()
-                                    },
-                                    Text::new("0"),
-                                    TextFont::from_font_size(14.0),
-                                    TextColor(Color::WHITE),
-                                    HotbarCount(slot_index),
-                                ));
-                            }
+                            slot.spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    right: Val::Px(4.0),
+                                    bottom: Val::Px(2.0),
+                                    ..default()
+                                },
+                                Text::new(""),
+                                TextFont::from_font_size(10.0),
+                                TextColor(Color::WHITE),
+                                HotbarCount(slot_index),
+                            ));
                         });
                 }
             });
@@ -2749,30 +3372,90 @@ fn main_menu_actions(
 }
 
 fn world_select_actions(
+    mut commands: Commands,
     mut next: ResMut<NextState<AppState>>,
     buttons: Query<(&Interaction, &MenuAction), Changed<Interaction>>,
-    load_buttons: Query<(&Interaction, &LoadWorldAction), Changed<Interaction>>,
+    select_buttons: Query<(&Interaction, &SelectWorldAction), Changed<Interaction>>,
+    mut world_rows: Query<(&SelectWorldAction, &mut BackgroundColor)>,
+    mut selection_status: Query<&mut Text, With<WorldSelectionStatus>>,
+    mut selected: ResMut<SelectedWorld>,
     mut pending: ResMut<PendingWorld>,
     mut storage: ResMut<WorldStorage>,
 ) {
     for (interaction, action) in &buttons {
-        if *interaction == Interaction::Pressed && matches!(action.0, MenuCommand::Back) {
-            next.set(AppState::MainMenu);
-        }
-    }
-    for (interaction, action) in &load_buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        match load_world(&action.0) {
-            Ok(save) => {
-                pending.save = Some(save);
-                pending.path = Some(action.0.clone());
-                pending.is_new_world = false;
-                *storage = WorldStorage::default();
-                next.set(AppState::LoadingWorld);
+        match action.0 {
+            MenuCommand::Back => next.set(AppState::MainMenu),
+            MenuCommand::Create => {
+                commands.insert_resource(WorldForm::default());
+                next.set(AppState::CreateWorld);
             }
-            Err(error) => error!("Could not load world {:?}: {error}", action.0),
+            MenuCommand::PlaySelected => {
+                let Some(path) = selected.path.as_ref() else {
+                    continue;
+                };
+                match load_world(path) {
+                    Ok(save) => {
+                        pending.save = Some(save);
+                        pending.path = Some(path.clone());
+                        pending.is_new_world = false;
+                        *storage = WorldStorage::default();
+                        next.set(AppState::LoadingWorld);
+                    }
+                    Err(error) => error!("Could not load world {:?}: {error}", path),
+                }
+            }
+            MenuCommand::DeleteSelected if selected.path.is_some() => {
+                next.set(AppState::ConfirmDeleteWorld);
+            }
+            MenuCommand::ConfirmDelete => {
+                if let Some(path) = selected.path.as_ref() {
+                    let result = fs::remove_file(path)
+                        .map_err(|error| format!("No se pudo eliminar el mundo: {error}"))
+                        .and_then(|()| {
+                            let chunks = chunk_directory(path);
+                            if chunks.exists() {
+                                fs::remove_dir_all(&chunks).map_err(|error| {
+                                    format!("No se pudieron eliminar los chunks: {error}")
+                                })?;
+                            }
+                            Ok(())
+                        });
+                    match result {
+                        Ok(()) => {
+                            *selected = SelectedWorld::default();
+                            next.set(AppState::WorldSelect);
+                        }
+                        Err(error) => {
+                            error!("{error}");
+                            next.set(AppState::WorldSelect);
+                        }
+                    }
+                } else {
+                    next.set(AppState::WorldSelect);
+                }
+            }
+            MenuCommand::CancelDelete => next.set(AppState::WorldSelect),
+            _ => {}
+        }
+    }
+    for (interaction, action) in &select_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        selected.path = Some(action.path.clone());
+        selected.name = Some(action.name.clone());
+        for (row, mut background) in &mut world_rows {
+            background.0 = if row.path == action.path {
+                Color::srgb(0.18, 0.36, 0.29)
+            } else {
+                Color::srgb(0.12, 0.2, 0.25)
+            };
+        }
+        for mut text in &mut selection_status {
+            **text = format!("Seleccionado: {}", action.name).into();
         }
     }
 }
@@ -2872,14 +3555,16 @@ fn create_world_actions(
                     version: SAVE_VERSION,
                     name: name.into(),
                     seed,
+                    terrain_version: TERRAIN_VERSION,
                     time_of_day_seconds: DEFAULT_TIME_OF_DAY_SECONDS,
-                    player_position: [8.5, 15.0, 8.5],
+                    player_position: [8.5, 64.0, 8.5],
                     player_yaw: 0.0,
                     player_pitch: -0.3,
                     selected_block: GRASS,
                     selected_hotbar_slot: 0,
                     inventory: [0; LEGACY_BLOCK_COUNT],
-                    extra_inventory: [0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+                    extra_inventory: vec![0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+                    slot_inventory: Some(Inventory::default()),
                     health: MAX_HEALTH,
                     hunger: MAX_HUNGER,
                     experience: 0,
@@ -2969,6 +3654,7 @@ fn begin_loading_world(
     mut selected_slot: ResMut<SelectedHotbarSlot>,
     mut pending: ResMut<PendingWorld>,
     mut storage: ResMut<WorldStorage>,
+    mut streaming: ResMut<ChunkStreamingState>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     world.chunks.clear();
@@ -2979,6 +3665,8 @@ fn begin_loading_world(
     storage.failed_chunks.clear();
     storage.autosave_elapsed = 0.0;
     storage.retry_elapsed = 0.0;
+    storage.retry_generation = storage.retry_generation.wrapping_add(1);
+    streaming.invalidate();
     storage.metadata_save_requested = true;
     storage.status = "Sin guardar".into();
     storage.path.clone_from(&pending.path);
@@ -3000,9 +3688,20 @@ fn begin_loading_world(
 
     world.name.clone_from(&save.name);
     world.seed = save.seed;
+    world.terrain_version = save.terrain_version;
     day_night.time_of_day_seconds = save.time_of_day_seconds.rem_euclid(GAME_DAY_SECONDS);
-    inventory.counts[..LEGACY_BLOCK_COUNT].copy_from_slice(&save.inventory);
-    inventory.counts[LEGACY_BLOCK_COUNT..].copy_from_slice(&save.extra_inventory);
+    let Some(saved_inventory) = save
+        .slot_inventory
+        .as_ref()
+        .filter(|inventory| inventory.is_valid())
+    else {
+        error!("Loading was requested with invalid inventory data");
+        storage.status = "El inventario guardado no es válido.".into();
+        progress.initialized = false;
+        next.set(AppState::MainMenu);
+        return;
+    };
+    *inventory = saved_inventory.clone();
     survival.health = save.health;
     survival.hunger = save.hunger;
     survival.experience = save.experience;
@@ -3019,8 +3718,14 @@ fn begin_loading_world(
     crafted_tools.sword_durability = save.sword_durability;
     crafting_ui.open = false;
     crafting_ui.just_closed = false;
-    selected_slot.0 = resolve_hotbar_slot(save.selected_block, save.selected_hotbar_slot);
-    selected.0 = HOTBAR_BLOCKS[selected_slot.0];
+    selected_slot.0 = save.selected_hotbar_slot;
+    selected.0 = match inventory.slots[selected_slot.0] {
+        Some(ItemStack {
+            item: Item::Block(block),
+            ..
+        }) => block,
+        _ => AIR,
+    };
 
     storage.legacy_chunks = std::mem::take(&mut save.chunks)
         .into_iter()
@@ -3036,22 +3741,38 @@ fn begin_loading_world(
     let legacy_coordinates = storage.legacy_chunks.keys().copied().collect::<Vec<_>>();
     storage.dirty_chunks.extend(legacy_coordinates);
 
+    if progress.is_new_world {
+        let (spawn_x, ground, spawn_z) = world_spawn_point(save.seed, save.terrain_version);
+        save.player_position = [spawn_x, ground as f32 + 1.0 + PLAYER_EYE_HEIGHT, spawn_z];
+    }
+
     let player_block = IVec3::new(
         save.player_position[0].floor() as i32,
-        0,
+        save.player_position[1].floor() as i32,
         save.player_position[2].floor() as i32,
     );
-    let center = block_address(player_block).0;
-    progress.coordinates = chunk_coordinates_around(center, STREAM_LOAD_RADIUS);
+    let mut center = block_address(player_block).0;
+    let vertical_radius = if world.terrain_version >= 2 {
+        STREAM_VERTICAL_RADIUS
+    } else {
+        center.y = 0;
+        0
+    };
+    progress.coordinates = chunk_coordinates_around(center, STARTUP_LOAD_RADIUS, vertical_radius);
     progress.chunk_count = progress.coordinates.len();
     progress.total = progress.chunk_count * 2;
 }
 
-fn chunk_coordinates_around(center: IVec3, radius: i32) -> Vec<IVec3> {
-    let mut coordinates = Vec::with_capacity(((radius * 2 + 1).pow(2)) as usize);
+fn chunk_coordinates_around(center: IVec3, radius: i32, vertical_radius: i32) -> Vec<IVec3> {
+    let min_y = (center.y - vertical_radius).clamp(0, WORLD_HEIGHT / CHUNK_SIZE - 1);
+    let max_y = (center.y + vertical_radius).clamp(0, WORLD_HEIGHT / CHUNK_SIZE - 1);
+    let mut coordinates =
+        Vec::with_capacity(((radius * 2 + 1).pow(2) * (max_y - min_y + 1)) as usize);
     for z in -radius..=radius {
         for x in -radius..=radius {
-            coordinates.push(IVec3::new(center.x + x, 0, center.z + z));
+            for y in min_y..=max_y {
+                coordinates.push(IVec3::new(center.x + x, y, center.z + z));
+            }
         }
     }
     coordinates
@@ -3062,6 +3783,7 @@ fn loading_world_step(
     mut progress: ResMut<LoadingProgress>,
     mut world: ResMut<WorldData>,
     mut storage: ResMut<WorldStorage>,
+    mut streaming: ResMut<ChunkStreamingState>,
     mut pending: ResMut<PendingWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -3101,6 +3823,10 @@ fn loading_world_step(
                 if progress.material.is_none() {
                     progress.material = Some(materials.add(StandardMaterial {
                         base_color_texture: texture_assets.atlas.clone(),
+                        alpha_mode: AlphaMode::Mask(0.4),
+                        metallic: 0.0,
+                        perceptual_roughness: 1.0,
+                        reflectance: 0.0,
                         ..default()
                     }));
                 }
@@ -3111,13 +3837,16 @@ fn loading_world_step(
                     return;
                 };
                 let mesh = meshes.add(rendering::build_chunk_mesh(&world, coord));
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material),
-                    Transform::from_translation(coord.as_vec3() * CHUNK_SIZE as f32),
-                    ChunkMesh(coord),
-                    GameEntity,
-                ));
+                let entity = commands
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(coord.as_vec3() * CHUNK_SIZE as f32),
+                        ChunkMesh(coord),
+                        GameEntity,
+                    ))
+                    .id();
+                streaming.chunk_entities.insert(coord, entity);
                 progress.completed += 1;
             }
         }
@@ -3149,14 +3878,6 @@ fn loading_world_step(
         );
     }
     if progress.stage == LoadingStage::Meshes && progress.coordinates.is_empty() {
-        if let Some(save) = pending.save.as_mut() {
-            if progress.is_new_world {
-                let spawn_x = 8.5;
-                let spawn_z = 8.5;
-                let height = terrain_height(spawn_x as i32, spawn_z as i32, save.seed);
-                save.player_position = [spawn_x, height as f32 + 1.0 + PLAYER_EYE_HEIGHT, spawn_z];
-            }
-        }
         pending.is_new_world = false;
         progress.initialized = false;
         next.set(AppState::InGame);
@@ -3261,7 +3982,7 @@ fn pause_from_game(
     mut next: ResMut<NextState<AppState>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if crafting_ui.open || crafting_ui.just_closed {
+    if crafting_ui.open || crafting_ui.inventory_open || crafting_ui.just_closed {
         return;
     }
     if !keys.just_pressed(KeyCode::Escape) {
@@ -3272,241 +3993,6 @@ fn pause_from_game(
         window.cursor_options.visible = true;
     }
     next.set(AppState::Paused);
-}
-
-fn toggle_crafting(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut crafting: ResMut<CraftingUi>,
-    mut panel: Query<&mut Node, With<CraftingPanel>>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-) {
-    crafting.just_closed = false;
-    let close = crafting.open && keys.just_pressed(KeyCode::Escape);
-    if !keys.just_pressed(KeyCode::KeyC) && !close {
-        return;
-    }
-
-    let Ok(mut window) = windows.get_single_mut() else {
-        error!("Primary window is missing while toggling crafting");
-        return;
-    };
-    let Ok(mut node) = panel.get_single_mut() else {
-        error!("Crafting panel is missing from the game HUD");
-        return;
-    };
-
-    if crafting.open {
-        crafting.open = false;
-        crafting.just_closed = true;
-        node.display = Display::None;
-        window.cursor_options.grab_mode = CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
-    } else if window.cursor_options.grab_mode == CursorGrabMode::Locked {
-        crafting.open = true;
-        node.display = Display::Flex;
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
-    }
-}
-
-fn toggle_inventory_visibility(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut crafting: ResMut<CraftingUi>,
-    mut panel: Query<&mut Node, With<InventoryPanel>>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-) {
-    // Close inventory on Escape
-    if crafting.inventory_open && keys.just_pressed(KeyCode::Escape) {
-        crafting.inventory_open = false;
-        crafting.inventory_just_opened = true;
-    }
-
-    if !crafting.inventory_just_opened {
-        return;
-    }
-
-    crafting.inventory_just_opened = false;
-
-    let Ok(mut window) = windows.get_single_mut() else {
-        error!("Primary window is missing while toggling inventory");
-        return;
-    };
-
-    let Ok(mut node) = panel.get_single_mut() else {
-        // Inventory panel might not exist yet, so just skip
-        return;
-    };
-
-    if crafting.inventory_open {
-        node.display = Display::Flex;
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
-    } else {
-        node.display = Display::None;
-        window.cursor_options.grab_mode = CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
-    }
-}
-
-fn craft_recipe(
-    recipe: CraftRecipe,
-    inventory: &mut Inventory,
-    survival: &mut Survival,
-    tools: &mut CraftedTools,
-) -> Result<&'static str, &'static str> {
-    let costs: &[(u8, u32)] = match recipe {
-        CraftRecipe::WoodenPickaxe => {
-            if tools.pickaxe_durability > 0 {
-                return Err("Ya tienes un pico con durabilidad.");
-            }
-            &[(WOOD, 3), (STONE, 2)]
-        }
-        CraftRecipe::WoodenAxe => {
-            if tools.axe_durability > 0 {
-                return Err("Ya tienes un hacha con durabilidad.");
-            }
-            &[(WOOD, 2), (STONE, 1)]
-        }
-        CraftRecipe::WoodenShovel => {
-            if tools.shovel_durability > 0 {
-                return Err("Ya tienes una pala con durabilidad.");
-            }
-            &[(WOOD, 2), (STONE, 1)]
-        }
-        CraftRecipe::WoodenSword => {
-            if tools.sword_durability > 0 {
-                return Err("Ya tienes una espada con durabilidad.");
-            }
-            &[(WOOD, 2), (STONE, 2)]
-        }
-        CraftRecipe::BerryRation => {
-            if survival.food >= 99 {
-                return Err("No puedes llevar más comida.");
-            }
-            &[(LEAVES, 3), (WOOD, 1)]
-        }
-        CraftRecipe::Arrows => {
-            if inventory.count(LEAVES) < 2 || inventory.count(SAND) < 1 {
-                return Err("Necesitas 2 hojas y 1 arena para 5 flechas.");
-            }
-            &[(LEAVES, 2), (SAND, 1)]
-        }
-        CraftRecipe::WoodenDoor => &[(WOOD, 6)],
-        CraftRecipe::Stairs => &[(WOOD, 6)],
-        CraftRecipe::Slab => &[(WOOD, 3)],
-        CraftRecipe::Bricks => &[(STONE, 4)],
-        CraftRecipe::Planks => &[(WOOD, 1)],
-        CraftRecipe::Torch => &[(WOOD, 1), (STONE, 1)],
-    };
-
-    if costs
-        .iter()
-        .any(|(block, amount)| inventory.count(*block) < *amount)
-    {
-        return Err("No tienes los materiales necesarios.");
-    }
-    for (block, amount) in costs {
-        for _ in 0..*amount {
-            if !inventory.remove(*block) {
-                error!("Crafting materials changed after recipe validation");
-                return Err("No se pudieron consumir los materiales.");
-            }
-        }
-    }
-
-    match recipe {
-        CraftRecipe::WoodenPickaxe => {
-            tools.pickaxe_durability = 64;
-            Ok("Pico fabricado: 64 usos; rompe piedra para obtener extra.")
-        }
-        CraftRecipe::WoodenAxe => {
-            tools.axe_durability = 64;
-            Ok("Hacha fabricada: 64 usos; tala madera y recoge hojas extra.")
-        }
-        CraftRecipe::WoodenShovel => {
-            tools.shovel_durability = 64;
-            Ok("Pala fabricada: 64 usos; rompe arena y tierra 2x rápido.")
-        }
-        CraftRecipe::WoodenSword => {
-            tools.sword_durability = 32;
-            Ok("Espada fabricada: 32 usos; golpea sin romper bloques.")
-        }
-        CraftRecipe::BerryRation => {
-            survival.food += 1;
-            Ok("Ración preparada. Pulsa E para comer.")
-        }
-        CraftRecipe::Arrows => {
-            for _ in 0..5 {
-                if inventory.add(SAND).is_err() {
-                    // Usar SAND como marcador de flechas (vamos a cambiarlo luego)
-                    break;
-                }
-            }
-            Ok("5 flechas fabricadas. Equipa el arco y dispara con clic derecho.")
-        }
-        CraftRecipe::WoodenDoor => {
-            for _ in 0..3 {
-                let _ = inventory.add(WOODEN_DOOR);
-            }
-            Ok("3 puertas de madera fabricadas.")
-        }
-        CraftRecipe::Stairs => {
-            for _ in 0..4 {
-                let _ = inventory.add(STAIRS);
-            }
-            Ok("4 bloques de escaleras fabricados.")
-        }
-        CraftRecipe::Slab => {
-            for _ in 0..6 {
-                let _ = inventory.add(SLAB);
-            }
-            Ok("6 losas fabricadas.")
-        }
-        CraftRecipe::Bricks => {
-            for _ in 0..4 {
-                let _ = inventory.add(BRICKS);
-            }
-            Ok("4 bloques de ladrillo fabricados.")
-        }
-        CraftRecipe::Planks => {
-            for _ in 0..4 {
-                let _ = inventory.add(PLANKS);
-            }
-            Ok("4 tablones fabricados (2x material).")
-        }
-        CraftRecipe::Torch => {
-            for _ in 0..8 {
-                let _ = inventory.add(TORCH);
-            }
-            Ok("8 antorchas fabricadas (colocar para iluminar).")
-        }
-    }
-}
-
-fn craft_recipe_buttons(
-    crafting: Res<CraftingUi>,
-    mut inventory: ResMut<Inventory>,
-    mut survival: ResMut<Survival>,
-    mut tools: ResMut<CraftedTools>,
-    buttons: Query<(&Interaction, &CraftRecipeButton), Changed<Interaction>>,
-    mut status: Query<&mut Text, With<CraftingStatus>>,
-) {
-    if !crafting.open {
-        return;
-    }
-    let Ok(mut status) = status.get_single_mut() else {
-        error!("Crafting status text is missing from the game HUD");
-        return;
-    };
-    for (interaction, recipe) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        status.0 = match craft_recipe(recipe.0, &mut inventory, &mut survival, &mut tools) {
-            Ok(message) => message.into(),
-            Err(message) => message.into(),
-        };
-    }
 }
 
 fn data_directory() -> Result<PathBuf, String> {
@@ -3591,15 +4077,52 @@ fn load_world(path: &Path) -> Result<WorldSave, String> {
     }
     let contents =
         fs::read_to_string(path).map_err(|error| format!("No se pudo leer el archivo: {error}"))?;
-    let save: WorldSave = ron::from_str(&contents)
+    let mut save: WorldSave = ron::from_str(&contents)
         .map_err(|error| format!("El archivo de mundo no es válido: {error}"))?;
+    migrate_world_save(&mut save)?;
     validate_world_save(&save)?;
     Ok(save)
+}
+
+fn migrate_world_save(save: &mut WorldSave) -> Result<(), String> {
+    if save.version != 1 {
+        return Ok(());
+    }
+
+    // Version 1 saved block counts in legacy arrays. Rebuild the slot-based
+    // inventory so these worlds remain visible and playable in the current UI.
+    if save.slot_inventory.is_none() {
+        let mut inventory = Inventory::default();
+        for (block, count) in save.inventory.iter().copied().enumerate() {
+            if block != AIR as usize && count > 0 {
+                inventory
+                    .try_add(Item::Block(block as u8), count)
+                    .map_err(|error| format!("No se pudo migrar el inventario: {error}"))?;
+            }
+        }
+        for (index, count) in save.extra_inventory.iter().copied().enumerate() {
+            let block = index + LEGACY_BLOCK_COUNT;
+            if count > 0 && block < BLOCK_COUNT {
+                inventory
+                    .try_add(Item::Block(block as u8), count)
+                    .map_err(|error| format!("No se pudo migrar el inventario: {error}"))?;
+            }
+        }
+        save.slot_inventory = Some(inventory);
+    }
+    save.version = SAVE_VERSION;
+    Ok(())
 }
 
 fn validate_world_save(save: &WorldSave) -> Result<(), String> {
     if save.version != SAVE_VERSION {
         return Err(format!("Versión de mundo no compatible: {}", save.version));
+    }
+    if save.terrain_version == 0 || save.terrain_version > TERRAIN_VERSION {
+        return Err(format!(
+            "Versión de terreno no compatible: {}",
+            save.terrain_version
+        ));
     }
     if save.name.trim().is_empty() || save.name.chars().count() > 32 {
         return Err("El nombre del mundo no es válido.".into());
@@ -3607,8 +4130,15 @@ fn validate_world_save(save: &WorldSave) -> Result<(), String> {
     if save.selected_hotbar_slot >= HOTBAR_SLOT_COUNT {
         return Err("El bloque seleccionado no es válido.".into());
     }
-    if !is_valid_block(save.selected_block) {
+    if save.selected_block >= BLOCK_COUNT as u8 {
         return Err("El bloque seleccionado no es válido.".into());
+    }
+    if !save
+        .slot_inventory
+        .as_ref()
+        .is_some_and(Inventory::is_valid)
+    {
+        return Err("El inventario guardado no es válido.".into());
     }
     if save.player_position.iter().any(|value| !value.is_finite()) {
         return Err("La posición guardada del jugador no es válida.".into());
@@ -3634,7 +4164,11 @@ fn validate_world_save(save: &WorldSave) -> Result<(), String> {
     if save.food > 99 {
         return Err("La cantidad de comida guardada no es válida.".into());
     }
-    if save.pickaxe_durability > 64 || save.axe_durability > 64 || save.shovel_durability > 64 || save.sword_durability > 32 {
+    if save.pickaxe_durability > 64
+        || save.axe_durability > 64
+        || save.shovel_durability > 64
+        || save.sword_durability > 32
+    {
         return Err("La durabilidad de una herramienta guardada no es válida.".into());
     }
     if save
@@ -3656,7 +4190,9 @@ fn validate_world_save(save: &WorldSave) -> Result<(), String> {
         {
             return Err("Un chunk guardado está fuera de los límites permitidos.".into());
         }
-        if chunk.blocks.len() != CHUNK_VOLUME || chunk.blocks.iter().any(|block| *block > LEAVES) {
+        if chunk.blocks.len() != CHUNK_VOLUME
+            || chunk.blocks.iter().any(|block| *block >= BLOCK_COUNT as u8)
+        {
             return Err("Un chunk guardado tiene datos inválidos.".into());
         }
         if !coordinates.insert(chunk.coord) {
@@ -3669,31 +4205,12 @@ fn validate_world_save(save: &WorldSave) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_hotbar_slot(selected_block: u8, saved_slot: usize) -> usize {
-    if saved_slot < HOTBAR_SLOT_COUNT && HOTBAR_BLOCKS[saved_slot] == selected_block {
-        return saved_slot;
-    }
-    HOTBAR_BLOCKS
-        .iter()
-        .position(|block| *block == selected_block)
-        .unwrap_or_default()
-}
-
 fn is_valid_block(block: u8) -> bool {
-    block <= LEAVES
+    block < BLOCK_COUNT as u8
 }
 
 fn block_name(block: u8) -> &'static str {
-    match block {
-        AIR => "Vacío",
-        GRASS => "Césped",
-        DIRT => "Tierra",
-        STONE => "Piedra",
-        SAND => "Arena",
-        WOOD => "Madera",
-        LEAVES => "Hojas",
-        _ => "Desconocido",
-    }
+    block_definition(block).name_es
 }
 
 fn experience_required(level: u32) -> u32 {
@@ -3714,11 +4231,7 @@ fn experience_progress(total_experience: u32) -> (u32, u32, u32) {
 }
 
 fn experience_for_block(block: u8) -> u32 {
-    match block {
-        STONE | WOOD => 2,
-        GRASS | DIRT | SAND | LEAVES => 1,
-        _ => 0,
-    }
+    block_definition(block).experience
 }
 
 fn fall_damage(impact_speed: f32) -> f32 {
@@ -3823,14 +4336,15 @@ fn snapshot_world(
     survival: &Survival,
     crafted_tools: &CraftedTools,
 ) -> WorldSave {
-    let mut legacy_inventory = [0; LEGACY_BLOCK_COUNT];
-    legacy_inventory.copy_from_slice(&inventory.counts[..LEGACY_BLOCK_COUNT]);
-    let mut extra_inventory = [0; BLOCK_COUNT - LEGACY_BLOCK_COUNT];
-    extra_inventory.copy_from_slice(&inventory.counts[LEGACY_BLOCK_COUNT..]);
+    let legacy_inventory = std::array::from_fn(|index| inventory.count(index as u8));
+    let extra_inventory = (LEGACY_BLOCK_COUNT..BLOCK_COUNT)
+        .map(|index| inventory.count(index as u8))
+        .collect();
     WorldSave {
         version: SAVE_VERSION,
         name: world.name.clone(),
         seed: world.seed,
+        terrain_version: world.terrain_version,
         time_of_day_seconds,
         player_position: player_position.to_array(),
         player_yaw: player.yaw,
@@ -3839,6 +4353,7 @@ fn snapshot_world(
         selected_hotbar_slot,
         inventory: legacy_inventory,
         extra_inventory,
+        slot_inventory: Some(inventory.clone()),
         health: survival.health,
         hunger: survival.hunger,
         experience: survival.experience,
@@ -3860,7 +4375,9 @@ fn chunk_file_path(world_path: &Path, coord: IVec3) -> PathBuf {
 }
 
 fn save_chunk_file(world_path: &Path, coord: IVec3, chunk: &Chunk) -> Result<(), String> {
-    if chunk.blocks.len() != CHUNK_VOLUME || chunk.blocks.iter().any(|block| *block >= BLOCK_COUNT as u8) {
+    if chunk.blocks.len() != CHUNK_VOLUME
+        || chunk.blocks.iter().any(|block| *block >= BLOCK_COUNT as u8)
+    {
         return Err(format!("Los datos del chunk {coord:?} no son válidos."));
     }
     let directory = chunk_directory(world_path);
@@ -3985,14 +4502,16 @@ fn autosave_world(
     day_night: Res<DayNightCycle>,
     mut storage: ResMut<WorldStorage>,
 ) {
+    let was_retrying = storage.retry_elapsed > 0.0;
+    storage.retry_elapsed = (storage.retry_elapsed - time.delta_secs()).max(0.0);
+    if was_retrying && storage.retry_elapsed == 0.0 && !storage.failed_chunks.is_empty() {
+        storage.failed_chunks.clear();
+        storage.retry_generation = storage.retry_generation.wrapping_add(1);
+    }
     let Some(path) = storage.path.clone() else {
         return;
     };
     storage.autosave_elapsed += time.delta_secs();
-    storage.retry_elapsed = (storage.retry_elapsed - time.delta_secs()).max(0.0);
-    if storage.retry_elapsed == 0.0 {
-        storage.failed_chunks.clear();
-    }
     if storage.autosave_elapsed >= AUTOSAVE_INTERVAL_SECONDS {
         storage.autosave_elapsed = 0.0;
         storage.metadata_save_requested = true;
@@ -4068,6 +4587,92 @@ fn autosave_world(
 }
 
 /// Create particle effects when a block is destroyed
+fn block_drop_color(block_type: u8) -> Color {
+    let color = block_definition(block_type).drop_color;
+    Color::linear_rgb(color[0], color[1], color[2])
+}
+
+fn item_drop_color(item: Item) -> Color {
+    match item {
+        Item::Block(block) => block_drop_color(block),
+        Item::Mineral(MineralKind::Coal) => Color::srgb(0.12, 0.12, 0.13),
+        Item::Mineral(MineralKind::RawCopper) => Color::srgb(0.78, 0.42, 0.24),
+        Item::Mineral(MineralKind::RawIron) => Color::srgb(0.70, 0.56, 0.45),
+        Item::Tool { .. } => Color::srgb(0.55, 0.58, 0.62),
+        Item::BerryRation => Color::srgb(0.42, 0.62, 0.28),
+        Item::Arrow => Color::srgb(0.72, 0.68, 0.55),
+    }
+}
+
+fn inventory_item_for_block_drop(drop: BlockDropDefinition) -> Item {
+    match drop {
+        BlockDropDefinition::Block(block) => Item::Block(block),
+        BlockDropDefinition::Mineral(mineral) => Item::Mineral(mineral),
+    }
+}
+
+fn spawn_block_drop(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    position: Vec3,
+    item: Item,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.28, 0.28, 0.28))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: item_drop_color(item),
+            ..default()
+        })),
+        Transform::from_translation(position),
+        BlockDrop {
+            item,
+            velocity: Vec3::new(0.0, 2.0, 0.0),
+            age: 0.0,
+        },
+    ));
+}
+
+fn update_block_drops(
+    mut commands: Commands,
+    time: Res<Time>,
+    world: Res<WorldData>,
+    player: Query<&Transform, With<Player>>,
+    mut inventory: ResMut<Inventory>,
+    mut drops: Query<(Entity, &mut BlockDrop, &mut Transform), Without<Player>>,
+) {
+    let Ok(player) = player.get_single() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    // The player's Transform is at eye height; use the body center for pickup range.
+    let pickup_target = player.translation - Vec3::Y * (PLAYER_EYE_HEIGHT - 0.5);
+    for (entity, mut drop, mut transform) in &mut drops {
+        drop.age += dt;
+        let to_player = pickup_target - transform.translation;
+        let distance = to_player.length();
+        if drop.age > 0.45 && distance <= 1.9 {
+            transform.translation += to_player.normalize_or_zero() * (6.0 * dt).min(distance);
+            if transform.translation.distance(pickup_target) <= 0.35
+                && inventory.try_add(drop.item, 1).is_ok()
+            {
+                commands.entity(entity).despawn();
+                continue;
+            }
+        } else {
+            let below = (transform.translation - Vec3::Y * 0.2).floor().as_ivec3();
+            if block_at(&world, below) != AIR {
+                drop.velocity.y = drop.velocity.y.max(0.0);
+                transform.translation.y = transform.translation.y.max(below.y as f32 + 1.14);
+            } else {
+                drop.velocity.y -= 12.0 * dt;
+                transform.translation.y += drop.velocity.y * dt;
+            }
+        }
+        transform.rotate_y(dt * 1.8);
+    }
+}
+
 fn spawn_block_particles(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -4077,29 +4682,23 @@ fn spawn_block_particles(
 ) {
     // Spawn 5 particles per destroyed block
     let particle_count = 5;
-    let block_color = match block_type {
-        GRASS => Color::linear_rgb(0.3, 0.7, 0.3),
-        DIRT => Color::linear_rgb(0.6, 0.4, 0.2),
-        STONE => Color::linear_rgb(0.5, 0.5, 0.5),
-        SAND => Color::linear_rgb(0.8, 0.75, 0.5),
-        WOOD => Color::linear_rgb(0.4, 0.25, 0.1),
-        LEAVES => Color::linear_rgb(0.2, 0.6, 0.2),
-        WATER => Color::linear_rgb(0.2, 0.5, 0.8),
-        LAVA => Color::linear_rgb(1.0, 0.5, 0.0),
-        _ => Color::linear_rgb(0.7, 0.7, 0.7),
-    };
-    
+    let block_color = block_drop_color(block_type);
+
     for i in 0..particle_count {
         let angle = (i as f32 / particle_count as f32) * std::f32::consts::TAU;
         let speed = 2.0 + (i as f32) * 0.3;
-        let velocity = Vec3::new(angle.cos() * speed, 3.0 + (i as f32) * 0.2, angle.sin() * speed);
-        
+        let velocity = Vec3::new(
+            angle.cos() * speed,
+            3.0 + (i as f32) * 0.2,
+            angle.sin() * speed,
+        );
+
         let mesh = meshes.add(Cuboid::new(0.1, 0.1, 0.1));
         let material = materials.add(StandardMaterial {
             base_color: block_color,
             ..default()
         });
-        
+
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(material),
@@ -4124,7 +4723,7 @@ fn update_particles(
             commands.entity(entity).despawn();
             continue;
         }
-        
+
         // Physics: apply gravity and velocity
         let gravity = Vec3::new(0.0, -9.8, 0.0);
         let dt = time.delta_secs();
@@ -4141,38 +4740,124 @@ fn animate_water_lava(
     // Animate water and lava colors with a subtle pulsing effect
     let wave = (time.elapsed_secs() * 2.0).sin(); // Oscillates between -1 and 1
     let brightness = 0.9 + wave * 0.1; // Varies between 0.8 and 1.0
-    
+
     if let Some(water_handle) = &texture_assets.water_material {
         if let Some(material) = materials.get_mut(water_handle) {
             // Water: cycle between light blue and slightly darker blue
-            material.base_color = Color::linear_rgb(
-                0.2 * brightness,
-                0.5 * brightness,
-                0.8 * brightness,
-            );
+            material.base_color =
+                Color::linear_rgb(0.2 * brightness, 0.5 * brightness, 0.8 * brightness);
         }
     }
-    
+
     if let Some(lava_handle) = &texture_assets.lava_material {
         if let Some(material) = materials.get_mut(lava_handle) {
             // Lava: cycle between orange and slightly darker orange
-            material.base_color = Color::linear_rgb(
-                1.0 * brightness,
-                0.5 * brightness,
-                0.0 * brightness,
-            );
+            material.base_color =
+                Color::linear_rgb(1.0 * brightness, 0.5 * brightness, 0.0 * brightness);
         }
+    }
+}
+
+fn chat_input(
+    mut events: EventReader<KeyboardInput>,
+    mut chat: ResMut<ChatState>,
+    crafting_ui: Res<CraftingUi>,
+    mut cycle: ResMut<DayNightCycle>,
+    mut survival: ResMut<Survival>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    for event in events.read() {
+        if !event.state.is_pressed() {
+            continue;
+        }
+        let opens_chat = matches!(
+            &event.logical_key,
+            Key::Character(character) if character.eq_ignore_ascii_case("t")
+        );
+        if !chat.open {
+            if opens_chat && !crafting_ui.open && !crafting_ui.inventory_open {
+                chat.open = true;
+                chat.input.clear();
+                if let Ok(mut window) = windows.get_single_mut() {
+                    window.cursor_options.grab_mode = CursorGrabMode::None;
+                    window.cursor_options.visible = true;
+                }
+            }
+            continue;
+        }
+
+        match &event.logical_key {
+            Key::Escape => {
+                chat.open = false;
+                if let Ok(mut window) = windows.get_single_mut() {
+                    window.cursor_options.grab_mode = CursorGrabMode::Locked;
+                    window.cursor_options.visible = false;
+                }
+            }
+            Key::Enter => {
+                let command = chat.input.trim().to_ascii_lowercase();
+                match command.as_str() {
+                    "/timesetday" => {
+                        cycle.time_of_day_seconds = 12.0 * 60.0 * 60.0;
+                        survival.notice = "Hora establecida: día.".into();
+                        survival.notice_elapsed = 3.0;
+                    }
+                    "" => {}
+                    _ if !command.starts_with('/') => {
+                        survival.notice = "Los comandos empiezan con /.".into();
+                        survival.notice_elapsed = 3.0;
+                    }
+                    _ => {
+                        survival.notice = "Comando desconocido.".into();
+                        survival.notice_elapsed = 3.0;
+                    }
+                }
+                chat.open = false;
+                chat.input.clear();
+                if let Ok(mut window) = windows.get_single_mut() {
+                    window.cursor_options.grab_mode = CursorGrabMode::Locked;
+                    window.cursor_options.visible = false;
+                }
+            }
+            Key::Backspace => {
+                chat.input.pop();
+            }
+            Key::Character(character)
+                if chat.input.chars().count() < 128 && !character.chars().any(char::is_control) =>
+            {
+                chat.input.push_str(character);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn update_chat_bar(
+    chat: Res<ChatState>,
+    mut bar: Query<&mut Node, With<ChatBar>>,
+    mut input: Query<&mut Text, With<ChatInputText>>,
+) {
+    if let Ok(mut bar) = bar.get_single_mut() {
+        bar.display = if chat.open {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if let Ok(mut input) = input.get_single_mut() {
+        input.0 = format!("> {}", chat.input);
     }
 }
 
 fn capture_pointer(
     mouse: Res<ButtonInput<MouseButton>>,
     crafting_ui: Res<CraftingUi>,
+    chat: Res<ChatState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut pointer: ResMut<PointerState>,
 ) {
     pointer.captured_this_frame = false;
-    if crafting_ui.open {
+    if crafting_ui.open || crafting_ui.inventory_open || chat.open {
         return;
     }
     let Ok(mut window) = windows.get_single_mut() else {
@@ -4193,7 +4878,11 @@ fn look(
     mut player: Query<(&mut Transform, &mut Player)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     pointer: Res<PointerState>,
+    chat: Res<ChatState>,
 ) {
+    if chat.open {
+        return;
+    }
     let delta = motion.read().map(|event| event.delta).sum::<Vec2>();
     let Ok(window) = windows.get_single() else {
         return;
@@ -4211,7 +4900,7 @@ fn look(
 }
 
 fn move_player(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     keys: Res<ButtonInput<KeyCode>>,
     world: Res<WorldData>,
     mut survival: ResMut<Survival>,
@@ -4229,10 +4918,19 @@ fn move_player(
         return;
     };
 
-    if keys.just_pressed(KeyCode::KeyF) {
+    let delta = time.delta_secs();
+    let jump_pressed = keys.pressed(KeyCode::Space) && !player.jump_key_down;
+    let flight_pressed = keys.pressed(KeyCode::KeyF) && !player.flight_key_down;
+    player.jump_key_down = keys.pressed(KeyCode::Space);
+    player.flight_key_down = keys.pressed(KeyCode::KeyF);
+
+    if flight_pressed {
         player.flying = !player.flying;
         player.velocity = Vec3::ZERO;
         player.grounded = false;
+        player.jump_buffer = 0.0;
+        player.coyote_time = 0.0;
+        player.step_up_remaining = 0.0;
         info!(
             "Movement mode: {}",
             if player.flying { "flight" } else { "walking" }
@@ -4245,6 +4943,9 @@ fn move_player(
             transform.translation = safe_position;
             player.velocity = Vec3::ZERO;
             player.grounded = false;
+            player.jump_buffer = 0.0;
+            player.coyote_time = 0.0;
+            player.step_up_remaining = 0.0;
         }
     }
 
@@ -4269,7 +4970,6 @@ fn move_player(
         direction -= right;
     }
 
-    let delta = time.delta_secs().min(0.05);
     if player.flying {
         if keys.pressed(KeyCode::Space) {
             direction.y += 1.0;
@@ -4277,31 +4977,89 @@ fn move_player(
         if keys.pressed(KeyCode::ControlLeft) {
             direction.y -= 1.0;
         }
-        if direction != Vec3::ZERO {
-            transform.translation += direction.normalize() * SPRINT_SPEED * delta;
-        }
+        let target_velocity = direction.normalize_or_zero() * SPRINT_SPEED;
+        let control_rate = if direction == Vec3::ZERO {
+            FLIGHT_FRICTION
+        } else {
+            FLIGHT_ACCELERATION
+        };
+        player.velocity = approach_velocity(player.velocity, target_velocity, control_rate * delta);
+        transform.translation += player.velocity * delta;
         return;
     }
 
-    let speed = if keys.pressed(KeyCode::ShiftLeft) {
+    let swimming = block_at(
+        &world,
+        (transform.translation - Vec3::Y * 0.9).floor().as_ivec3(),
+    ) == WATER;
+    let speed = if swimming {
+        WALK_SPEED * 0.7
+    } else if keys.pressed(KeyCode::ShiftLeft) {
         SPRINT_SPEED
     } else {
         WALK_SPEED
     };
-    direction = direction.normalize_or_zero() * speed;
-    player.velocity.x = direction.x;
-    player.velocity.z = direction.z;
+    let input_direction = direction.normalize_or_zero();
+    let target_velocity = input_direction * speed;
+    let horizontal_velocity = Vec2::new(player.velocity.x, player.velocity.z);
+    let target_horizontal_velocity = Vec2::new(target_velocity.x, target_velocity.z);
+    let control_rate = if player.grounded {
+        if input_direction == Vec3::ZERO {
+            GROUND_FRICTION
+        } else {
+            GROUND_ACCELERATION
+        }
+    } else if input_direction == Vec3::ZERO {
+        AIR_DRAG
+    } else {
+        AIR_ACCELERATION
+    };
+    let velocity_delta = target_horizontal_velocity - horizontal_velocity;
+    let horizontal_velocity = if velocity_delta.length() <= control_rate * delta {
+        target_horizontal_velocity
+    } else {
+        horizontal_velocity + velocity_delta.normalize() * control_rate * delta
+    };
+    player.velocity.x = horizontal_velocity.x;
+    player.velocity.z = horizontal_velocity.y;
 
-    if keys.just_pressed(KeyCode::Space) && player.grounded {
-        player.velocity.y = JUMP_SPEED;
-        player.grounded = false;
+    let was_grounded = player.grounded;
+    if was_grounded {
+        player.coyote_time = COYOTE_TIME_SECONDS;
+    } else {
+        player.coyote_time = (player.coyote_time - delta).max(0.0);
     }
-    player.velocity.y = (player.velocity.y - GRAVITY * delta).max(-50.0);
+    if jump_pressed {
+        player.jump_buffer = JUMP_BUFFER_SECONDS;
+    } else {
+        player.jump_buffer = (player.jump_buffer - delta).max(0.0);
+    }
+
+    if swimming {
+        player.jump_buffer = 0.0;
+        if jump_pressed {
+            player.velocity.y = 3.0;
+        }
+        player.velocity.y = (player.velocity.y - 4.0 * delta).max(-3.0);
+    } else {
+        if player.jump_buffer > 0.0 && player.coyote_time > 0.0 {
+            player.velocity.y = JUMP_SPEED;
+            player.jump_buffer = 0.0;
+            player.coyote_time = 0.0;
+            player.grounded = false;
+            player.step_up_remaining = 0.0;
+        }
+        if player.step_up_remaining > 0.0 {
+            player.velocity.y = 0.0;
+        } else {
+            player.velocity.y = (player.velocity.y - GRAVITY * delta).max(-50.0);
+        }
+    }
 
     let displacement = player.velocity * delta;
-    let step_count = (displacement.abs().max_element() / 0.15).ceil().max(1.0) as usize;
+    let step_count = (displacement.abs().max_element() / 0.05).ceil().max(1.0) as usize;
     let step = displacement / step_count as f32;
-    let can_step = player.grounded;
+    let can_step = was_grounded || player.step_up_remaining > 0.0;
     player.grounded = false;
 
     for _ in 0..step_count {
@@ -4310,29 +5068,54 @@ fn move_player(
             candidate[axis] += step[axis];
             if !collides_with_world(&world, candidate) {
                 transform.translation = candidate;
-            } else if can_step && step[axis] != 0.0 {
+            } else if can_step && step[axis] != 0.0 && player.step_up_remaining == 0.0 {
                 let raised = transform.translation + Vec3::Y * STEP_HEIGHT;
                 let mut stepped = raised;
                 stepped[axis] += step[axis];
                 if !collides_with_world(&world, raised) && !collides_with_world(&world, stepped) {
-                    transform.translation = stepped;
+                    player.step_up_remaining = STEP_HEIGHT;
                     player.velocity.y = 0.0;
                 }
             }
         }
+    }
 
+    if player.step_up_remaining > 0.0 {
+        let lift = (STEP_UP_SPEED * delta).min(player.step_up_remaining);
         let mut candidate = transform.translation;
-        candidate.y += step.y;
+        candidate.y += lift;
         if !collides_with_world(&world, candidate) {
             transform.translation = candidate;
-        } else {
-            if step.y < 0.0 {
-                player.grounded = true;
-                let impact_speed = -player.velocity.y;
-                apply_damage(&mut survival, fall_damage(impact_speed), "Daño por caída");
-            }
+            player.step_up_remaining -= lift;
+            player.grounded = true;
             player.velocity.y = 0.0;
+        } else {
+            player.step_up_remaining = 0.0;
         }
+    } else {
+        for _ in 0..step_count {
+            let mut candidate = transform.translation;
+            candidate.y += step.y;
+            if !collides_with_world(&world, candidate) {
+                transform.translation = candidate;
+            } else {
+                if step.y < 0.0 {
+                    player.grounded = true;
+                    let impact_speed = -player.velocity.y;
+                    apply_damage(&mut survival, fall_damage(impact_speed), "Daño por caída");
+                }
+                player.velocity.y = 0.0;
+            }
+        }
+    }
+}
+
+fn approach_velocity(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
+    let difference = target - current;
+    if difference.length() <= max_delta {
+        target
+    } else {
+        current + difference.normalize_or_zero() * max_delta
     }
 }
 
@@ -4357,14 +5140,15 @@ fn update_survival(
     advance_survival_stats(&mut survival, delta, sprinting);
 
     if survival.health <= 0.0 {
-        let spawn_x = 8.5;
-        let spawn_z = 8.5;
-        let ground = terrain_height(spawn_x as i32, spawn_z as i32, world.seed);
+        let (spawn_x, ground, spawn_z) = world_spawn_point(world.seed, world.terrain_version);
         transform.translation =
             Vec3::new(spawn_x, ground as f32 + 1.0 + PLAYER_EYE_HEIGHT, spawn_z);
         player.velocity = Vec3::ZERO;
         player.grounded = false;
         player.flying = false;
+        player.jump_buffer = 0.0;
+        player.coyote_time = 0.0;
+        player.step_up_remaining = 0.0;
         survival.health = MAX_HEALTH / 2.0;
         survival.hunger = MAX_HUNGER / 2.0;
         survival.passive_hunger_elapsed = 0.0;
@@ -4376,33 +5160,16 @@ fn update_survival(
     }
 }
 
-fn consume_food(
+fn consume_stored_food(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut survival: ResMut<Survival>,
-    mut crafting_ui: ResMut<CraftingUi>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyE)
-        || !windows
+    if keys.just_pressed(KeyCode::KeyR)
+        && windows
             .get_single()
             .is_ok_and(|window| window.cursor_options.grab_mode == CursorGrabMode::Locked)
     {
-        return;
-    }
-
-    // Toggle inventory with E
-    crafting_ui.inventory_open = !crafting_ui.inventory_open;
-    if crafting_ui.inventory_open {
-        crafting_ui.inventory_just_opened = true;
-    }
-
-    // If inventory is now open, don't eat
-    if crafting_ui.inventory_open {
-        return;
-    }
-
-    // Eat only if inventory is closed
-    if survival.food > 0 && survival.hunger < MAX_HUNGER {
         eat_food(&mut survival);
     }
 }
@@ -4412,6 +5179,7 @@ fn stream_world_chunks(
     player: Query<&Transform, With<Player>>,
     mut world: ResMut<WorldData>,
     mut storage: ResMut<WorldStorage>,
+    mut streaming: ResMut<ChunkStreamingState>,
     mut loading: ResMut<LoadingProgress>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -4423,27 +5191,71 @@ fn stream_world_chunks(
     };
     let player_block = IVec3::new(
         player.translation.x.floor() as i32,
-        0,
+        player.translation.y.floor() as i32,
         player.translation.z.floor() as i32,
     );
-    let center = block_address(player_block).0;
+    let mut center = block_address(player_block).0;
+    let vertical_radius = if world.terrain_version >= 2 {
+        STREAM_VERTICAL_RADIUS
+    } else {
+        center.y = 0;
+        0
+    };
 
-    let unload = chunk_entities
-        .iter()
-        .filter_map(|(entity, chunk)| {
-            let distance = (i64::from(chunk.0.x) - i64::from(center.x))
-                .abs()
-                .max((i64::from(chunk.0.z) - i64::from(center.z)).abs());
-            (distance > i64::from(STREAM_UNLOAD_RADIUS)).then_some((entity, chunk.0))
-        })
-        .collect::<Vec<_>>();
-    for (entity, coord) in unload {
-        if storage.failed_chunks.contains(&coord) {
+    let refresh_queue = streaming.center != Some(center)
+        || streaming.vertical_radius != vertical_radius
+        || streaming.retry_generation != storage.retry_generation;
+    if refresh_queue {
+        streaming.pending_unloads = chunk_entities
+            .iter()
+            .filter_map(|(entity, chunk)| {
+                let coord = chunk.0;
+                let distance = (i64::from(coord.x) - i64::from(center.x))
+                    .abs()
+                    .max((i64::from(coord.z) - i64::from(center.z)).abs());
+                let vertical_distance = (i64::from(coord.y) - i64::from(center.y)).abs();
+                (distance > i64::from(STREAM_UNLOAD_RADIUS)
+                    || vertical_distance > i64::from(vertical_radius))
+                .then_some((entity, coord))
+                .filter(|(_, coord)| !storage.failed_chunks.contains(coord))
+            })
+            .collect();
+        streaming.next_unload = 0;
+        streaming.pending = chunk_coordinates_around(center, STREAM_LOAD_RADIUS, vertical_radius)
+            .into_iter()
+            .filter(|coord| {
+                !world.chunks.contains_key(coord) && !storage.failed_chunks.contains(coord)
+            })
+            .collect();
+        streaming.pending.sort_unstable_by_key(|coord| {
+            let x = i64::from(coord.x) - i64::from(center.x);
+            let y = i64::from(coord.y) - i64::from(center.y);
+            let z = i64::from(coord.z) - i64::from(center.z);
+            (x * x + y * y + z * z, coord.x, coord.y, coord.z)
+        });
+        streaming.center = Some(center);
+        streaming.vertical_radius = vertical_radius;
+        streaming.retry_generation = storage.retry_generation;
+        streaming.next = 0;
+    }
+
+    let mut unloaded = 0;
+    while unloaded < MAX_CHUNK_UNLOADS_PER_FRAME {
+        let Some((entity, coord)) = streaming
+            .pending_unloads
+            .get(streaming.next_unload)
+            .copied()
+        else {
+            break;
+        };
+        streaming.next_unload += 1;
+        if chunk_entities.get(entity).is_err() {
             continue;
         }
         if let Some(chunk) = world.modified_chunks.get(&coord) {
             let Some(path) = storage.path.as_ref() else {
                 storage.status = "No se encontró la ruta para guardar un chunk.".into();
+                storage.failed_chunks.insert(coord);
                 storage.retry_elapsed = 5.0;
                 continue;
             };
@@ -4464,27 +5276,22 @@ fn stream_world_chunks(
             }
         }
         commands.entity(entity).despawn();
+        streaming.chunk_entities.remove(&coord);
         world.chunks.remove(&coord);
         world.dirty.remove(&coord);
         mark_chunk_neighbors_dirty(&mut world, coord);
+        unloaded += 1;
     }
 
-    let mut missing = chunk_coordinates_around(center, STREAM_LOAD_RADIUS)
-        .into_iter()
-        .filter(|coord| !world.chunks.contains_key(coord))
-        .collect::<Vec<_>>();
-    missing.sort_unstable_by_key(|coord| {
-        let x = i64::from(coord.x) - i64::from(center.x);
-        let z = i64::from(coord.z) - i64::from(center.z);
-        x * x + z * z
-    });
-    let Some(coord) = missing.first().copied() else {
-        return;
+    let coord = loop {
+        let Some(coord) = streaming.pending.get(streaming.next).copied() else {
+            return;
+        };
+        streaming.next += 1;
+        if !world.chunks.contains_key(&coord) && !storage.failed_chunks.contains(&coord) {
+            break coord;
+        }
     };
-
-    if storage.failed_chunks.contains(&coord) {
-        return;
-    }
     let chunk = match load_or_generate_chunk(&mut world, &mut storage, coord) {
         Ok(chunk) => chunk,
         Err(error) => {
@@ -4501,6 +5308,10 @@ fn stream_world_chunks(
     if loading.material.is_none() {
         loading.material = Some(materials.add(StandardMaterial {
             base_color_texture: texture_assets.atlas.clone(),
+            alpha_mode: AlphaMode::Mask(0.4),
+            metallic: 0.0,
+            perceptual_roughness: 1.0,
+            reflectance: 0.0,
             ..default()
         }));
     }
@@ -4510,17 +5321,20 @@ fn stream_world_chunks(
         return;
     };
     let mesh = meshes.add(rendering::build_chunk_mesh(&world, coord));
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(coord.as_vec3() * CHUNK_SIZE as f32),
-        ChunkMesh(coord),
-        GameEntity,
-    ));
+    let entity = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(coord.as_vec3() * CHUNK_SIZE as f32),
+            ChunkMesh(coord),
+            GameEntity,
+        ))
+        .id();
+    streaming.chunk_entities.insert(coord, entity);
 }
 
 fn mark_chunk_neighbors_dirty(world: &mut WorldData, coord: IVec3) {
-    for axis in [0, 2] {
+    for axis in [0, 1, 2] {
         for offset in [-1, 1] {
             let mut neighbor = coord;
             neighbor[axis] += offset;
@@ -4533,12 +5347,63 @@ fn mark_chunk_neighbors_dirty(world: &mut WorldData, coord: IVec3) {
 
 fn chunk_for_coordinate(world: &WorldData, coord: IVec3) -> Chunk {
     world.modified_chunks.get(&coord).map_or_else(
-        || generate_chunk(coord, world.seed),
+        || {
+            if world.terrain_version >= TERRAIN_VERSION {
+                generate_chunk(coord, world.seed)
+            } else if world.terrain_version >= 2 {
+                generate_v2_chunk(coord, world.seed)
+            } else if coord.y == 0 {
+                generate_legacy_chunk(coord, world.seed)
+            } else {
+                Chunk::new()
+            }
+        },
         |chunk| Chunk {
             blocks: chunk.blocks.clone(),
         },
     )
 }
+
+#[cfg(feature = "plains-audio")]
+fn update_plains_ambience(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    world: Res<WorldData>,
+    player: Query<&Transform, With<Player>>,
+    ambience: Query<Entity, With<PlainsAmbience>>,
+) {
+    let in_plains = player.get_single().is_ok_and(|transform| {
+        world_biome_at(
+            &world,
+            transform.translation.x.floor() as i32,
+            transform.translation.z.floor() as i32,
+        ) == Biome::Plains
+    });
+    if in_plains && ambience.is_empty() {
+        commands.spawn((
+            AudioPlayer::new(asset_server.load("audio/plains_ambience.wav")),
+            PlaybackSettings::LOOP.with_volume(Volume::new(0.22)),
+            PlainsAmbience,
+        ));
+    } else if !in_plains {
+        for entity in &ambience {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+
+#[cfg(feature = "plains-audio")]
+fn cleanup_plains_ambience(mut commands: Commands, ambience: Query<Entity, With<PlainsAmbience>>) {
+    for entity in &ambience {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+#[cfg(not(feature = "plains-audio"))]
+fn update_plains_ambience() {}
+
+#[cfg(not(feature = "plains-audio"))]
+fn cleanup_plains_ambience() {}
 
 fn update_mobs(
     mut commands: Commands,
@@ -4656,6 +5521,30 @@ fn update_mobs(
         return;
     };
     spawn_mob(&mut commands, &assets, kind, position);
+    if kind == MobKind::Grazer
+        && world_biome_at(&world, position.x.floor() as i32, position.z.floor() as i32)
+            == Biome::Plains
+    {
+        let herd_size = 2
+            + (coordinate_hash(
+                position.x as i32,
+                position.z as i32,
+                world.seed ^ population.spawn_attempt,
+            ) % 2) as usize;
+        let offsets = [(2, 1), (-2, 1), (1, -2), (-1, -2)];
+        for (index, (dx, dz)) in offsets.into_iter().take(herd_size - 1).enumerate() {
+            if grazer_count + index + 1 >= MAX_PASSIVE_MOBS || total_count + index + 1 >= MAX_MOBS {
+                break;
+            }
+            let x = position.x.floor() as i32 + dx;
+            let z = position.z.floor() as i32 + dz;
+            if world_biome_at(&world, x, z) == Biome::Plains {
+                if let Some(member_position) = mob_ground_position(&world, x, z) {
+                    spawn_mob(&mut commands, &assets, MobKind::Grazer, member_position);
+                }
+            }
+        }
+    }
 }
 
 fn is_night(daylight: f32) -> bool {
@@ -4683,13 +5572,18 @@ fn find_safe_spawn_position(world: &WorldData, mut position: Vec3) -> Vec3 {
 }
 
 fn mob_ground_height(world: &WorldData, x: i32, z: i32) -> Option<i32> {
-    let chunk = block_address(IVec3::new(x, 0, z)).0;
-    if !world.chunks.contains_key(&chunk) {
+    let chunk_x = x.div_euclid(CHUNK_SIZE);
+    let chunk_z = z.div_euclid(CHUNK_SIZE);
+    if !world
+        .chunks
+        .keys()
+        .any(|coord| coord.x == chunk_x && coord.z == chunk_z)
+    {
         return None;
     }
-    (0..CHUNK_SIZE)
+    (0..WORLD_HEIGHT)
         .rev()
-        .find(|&y| block_at(world, IVec3::new(x, y, z)) != AIR)
+        .find(|&y| is_block_solid(world, IVec3::new(x, y, z)))
 }
 
 fn mob_spawn_position(world: &WorldData, player_position: Vec3, attempt: u64) -> Option<Vec3> {
@@ -4704,29 +5598,37 @@ fn mob_spawn_position(world: &WorldData, player_position: Vec3, attempt: u64) ->
     let radius = 8.0 + ((hash >> 32) % 11) as f32;
     let x = (player_position.x + angle.cos() * radius).floor() as i32;
     let z = (player_position.z + angle.sin() * radius).floor() as i32;
-    let biome = biome_at(x, z, world.seed);
+    let biome = world_biome_at(world, x, z);
     if !matches!(biome, Biome::Plains | Biome::Forest) {
         return None;
     }
 
+    mob_ground_position(world, x, z)
+}
+
+fn mob_ground_position(world: &WorldData, x: i32, z: i32) -> Option<Vec3> {
     let ground = mob_ground_height(world, x, z)?;
     if block_at(world, IVec3::new(x, ground, z)) != GRASS
-        || block_at(world, IVec3::new(x, ground + 1, z)) != AIR
-        || block_at(world, IVec3::new(x, ground + 2, z)) != AIR
+        || !is_mob_clear_block(block_at(world, IVec3::new(x, ground + 1, z)))
+        || !is_mob_clear_block(block_at(world, IVec3::new(x, ground + 2, z)))
     {
         return None;
     }
-    
+
     // Torches can prevent mob spawning by providing light
     // Light level calculation includes torch proximity (can be < 8 even if torches nearby)
     // For now, this is informational; actual darkness requirements happen at mob_update
     let _spawn_pos = IVec3::new(x, ground + 1, z);
-    
+
     Some(Vec3::new(
         x as f32 + 0.5,
         ground as f32 + 1.0,
         z as f32 + 0.5,
     ))
+}
+
+fn is_mob_clear_block(block: u8) -> bool {
+    matches!(block, AIR | RED_FLOWER | YELLOW_FLOWER | TALL_GRASS)
 }
 
 fn spawn_mob(commands: &mut Commands, assets: &MobAssets, kind: MobKind, position: Vec3) {
@@ -4872,9 +5774,13 @@ fn collides_with_world(world: &WorldData, eye_position: Vec3) -> bool {
 
 fn select_block(
     keys: Res<ButtonInput<KeyCode>>,
-    mut selected: ResMut<SelectedBlock>,
     mut selected_slot: ResMut<SelectedHotbarSlot>,
+    ui: Res<CraftingUi>,
+    chat: Res<ChatState>,
 ) {
+    if ui.open || ui.inventory_open || chat.open {
+        return;
+    }
     let slot = [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -4882,18 +5788,20 @@ fn select_block(
         KeyCode::Digit4,
         KeyCode::Digit5,
         KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
     ]
     .iter()
     .position(|key| keys.just_pressed(*key));
     if let Some(slot) = slot {
-        set_hotbar_selection(slot, &mut selected, &mut selected_slot);
+        selected_slot.0 = slot;
     }
 }
 
 fn select_hotbar(
     mut wheel: EventReader<MouseWheel>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    mut selected: ResMut<SelectedBlock>,
     mut selected_slot: ResMut<SelectedHotbarSlot>,
 ) {
     let mut steps = 0_isize;
@@ -4908,17 +5816,21 @@ fn select_hotbar(
         return;
     }
     let slot = cycle_hotbar_selection(selected_slot.0, steps);
-    set_hotbar_selection(slot, &mut selected, &mut selected_slot);
+    selected_slot.0 = slot;
 }
 
-fn set_hotbar_selection(
-    slot: usize,
-    selected: &mut SelectedBlock,
-    selected_slot: &mut SelectedHotbarSlot,
+fn sync_selected_block(
+    inventory: Res<Inventory>,
+    selected_slot: Res<SelectedHotbarSlot>,
+    mut selected: ResMut<SelectedBlock>,
 ) {
-    let slot = slot % HOTBAR_SLOT_COUNT;
-    selected_slot.0 = slot;
-    selected.0 = HOTBAR_BLOCKS[slot];
+    selected.0 = match inventory.slots[selected_slot.0] {
+        Some(ItemStack {
+            item: Item::Block(block),
+            ..
+        }) => block,
+        _ => AIR,
+    };
 }
 
 fn cycle_hotbar_selection(current: usize, steps: isize) -> usize {
@@ -4937,91 +5849,37 @@ fn mouse_wheel_steps(y: f32, unit: MouseScrollUnit) -> isize {
     -magnitude * y.signum() as isize
 }
 
-fn update_hud(
-    selected: Res<SelectedBlock>,
-    selected_slot: Res<SelectedHotbarSlot>,
-    inventory: Res<Inventory>,
-    survival: Res<Survival>,
-    crafted_tools: Res<CraftedTools>,
-    world: Res<WorldData>,
-    day_night: Res<DayNightCycle>,
-    storage: Res<WorldStorage>,
-    player: Query<(&Player, &Transform)>,
-    mut status: Query<&mut Text, With<HudStatus>>,
-) {
-    let (Ok((player, transform)), Ok(mut status)) = (player.get_single(), status.get_single_mut())
-    else {
-        return;
-    };
-    let mode = if player.flying { "VOLAR" } else { "CAMINAR" };
-    let block = block_name(selected.0);
-    let biome = biome_at(
-        transform.translation.x.floor() as i32,
-        transform.translation.z.floor() as i32,
-        world.seed,
-    )
-    .name();
-    let tools = [
-        (crafted_tools.pickaxe_durability > 0)
-            .then(|| format!("Pico {}", crafted_tools.pickaxe_durability)),
-        (crafted_tools.axe_durability > 0)
-            .then(|| format!("Hacha {}", crafted_tools.axe_durability)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
-    status.0 = format!(
-        "{mode}  [F] alternar\nBioma: {biome}\nHora: {}\nEspacio {}: {block} ×{}\nComida: {} [E]\n{tools}\n{}\n[C] crafteo  |  [Rueda] cambiar  |  [ESC] pausa{}",
-        format_time_of_day(day_night.time_of_day_seconds),
-        selected_slot.0 + 1,
-        inventory.count(selected.0),
-        survival.food,
-        storage.status,
-        if survival.notice_elapsed > 0.0 {
-            format!("\n{}", survival.notice)
-        } else {
-            String::new()
-        },
-    );
-}
-
 fn update_survival_hud(
     survival: Res<Survival>,
-    mut fills: Query<(&SurvivalBarFill, &mut Node, &mut BackgroundColor)>,
-    mut values: Query<(&SurvivalValue, &mut Text), Without<ExperienceText>>,
-    mut experience_text: Query<&mut Text, With<ExperienceText>>,
+    mut icons: Query<(&SurvivalIcon, &mut Text, &mut TextColor), Without<ExperienceText>>,
+    mut experience_fill: Query<&mut Node, With<ExperienceFill>>,
+    mut experience_text: Query<&mut Text, (With<ExperienceText>, Without<SurvivalIcon>)>,
 ) {
     let (level, progress, required) = experience_progress(survival.experience);
-    for (value, mut text) in &mut values {
-        let (label, amount, max) = match value.0 {
-            SurvivalBarKind::Health => ("Vida", survival.health, MAX_HEALTH),
-            SurvivalBarKind::Hunger => ("Hambre", survival.hunger, MAX_HUNGER),
-            SurvivalBarKind::Experience => continue,
+    for (icon, mut text, mut color) in &mut icons {
+        let amount = match icon.kind {
+            SurvivalIconKind::Health => survival.health,
+            SurvivalIconKind::Hunger => survival.hunger,
         };
-        text.0 = format!("{label}: {:.0}/{max:.0}", amount);
-    }
-    for (fill, mut node, mut color) in &mut fills {
-        let (ratio, tint) = match fill.0 {
-            SurvivalBarKind::Health => (
-                survival.health / MAX_HEALTH,
-                if survival.health <= 5.0 {
-                    Color::srgb(1.0, 0.12, 0.08)
-                } else {
-                    Color::srgb(0.82, 0.18, 0.2)
-                },
-            ),
-            SurvivalBarKind::Hunger => (survival.hunger / MAX_HUNGER, Color::srgb(0.9, 0.62, 0.16)),
-            SurvivalBarKind::Experience => (
-                progress as f32 / required as f32,
-                Color::srgb(0.25, 0.75, 0.32),
-            ),
+        let fill = (amount - icon.index as f32 * 2.0).clamp(0.0, 2.0);
+        let half = fill >= 1.0 && fill < 2.0;
+        let full = fill >= 2.0;
+        let (symbol, tint) = match (icon.kind, full, half) {
+            (SurvivalIconKind::Health, true, _) => ("♥", Color::srgb(0.92, 0.16, 0.18)),
+            (SurvivalIconKind::Health, false, true) => ("♥", Color::srgb(1.0, 0.46, 0.42)),
+            (SurvivalIconKind::Health, false, false) => ("♡", Color::srgb(0.34, 0.18, 0.19)),
+            (SurvivalIconKind::Hunger, true, _) => ("●", Color::srgb(0.88, 0.58, 0.18)),
+            (SurvivalIconKind::Hunger, false, true) => ("◐", Color::srgb(0.88, 0.58, 0.18)),
+            (SurvivalIconKind::Hunger, false, false) => ("○", Color::srgb(0.32, 0.29, 0.25)),
         };
-        node.width = Val::Percent(ratio.clamp(0.0, 1.0) * 100.0);
+        text.0 = symbol.into();
         color.0 = tint;
     }
+    if let Ok(mut fill) = experience_fill.get_single_mut() {
+        fill.width = Val::Percent(progress as f32 / required as f32 * 100.0);
+    }
     if let Ok(mut text) = experience_text.get_single_mut() {
-        text.0 = format!("Nivel {level} · {progress}/{required} XP");
+        text.0 = format!("{level}");
     }
 }
 
@@ -5033,7 +5891,12 @@ fn format_time_of_day(time_of_day_seconds: f32) -> String {
 fn update_hotbar(
     selected: Res<SelectedHotbarSlot>,
     inventory: Res<Inventory>,
-    mut slots: Query<(&HotbarSlot, &mut BorderColor, &mut Node)>,
+    mut slots: Query<(
+        &HotbarSlot,
+        &mut BorderColor,
+        &mut Node,
+        &mut BackgroundColor,
+    )>,
     mut counts: Query<(&HotbarCount, &mut Text)>,
 ) {
     let selection_changed = selected.is_changed();
@@ -5042,8 +5905,8 @@ fn update_hotbar(
         return;
     }
 
-    if selection_changed {
-        for (slot, mut border_color, mut node) in &mut slots {
+    for (slot, mut border_color, mut node, mut background) in &mut slots {
+        if selection_changed {
             let is_selected = slot.0 == selected.0;
             border_color.0 = if is_selected {
                 Color::WHITE
@@ -5052,10 +5915,33 @@ fn update_hotbar(
             };
             node.border = UiRect::all(Val::Px(if is_selected { 3.0 } else { 1.0 }));
         }
+        if inventory_changed {
+            background.0 = match inventory.slots[slot.0].map(|stack| stack.item) {
+                Some(Item::Block(GRASS)) => Color::srgb(0.25, 0.62, 0.22),
+                Some(Item::Block(DIRT)) => Color::srgb(0.43, 0.30, 0.18),
+                Some(Item::Block(STONE)) => Color::srgb(0.48, 0.50, 0.53),
+                Some(Item::Block(SAND)) => Color::srgb(0.82, 0.72, 0.45),
+                Some(Item::Block(WOOD)) => Color::srgb(0.48, 0.29, 0.12),
+                Some(Item::Block(LEAVES)) => Color::srgb(0.16, 0.48, 0.19),
+                Some(_) => Color::srgb(0.28, 0.30, 0.34),
+                None => Color::srgba(0.12, 0.14, 0.18, 0.9),
+            };
+        }
     }
     if inventory_changed {
         for (slot, mut text) in &mut counts {
-            text.0 = inventory.count(HOTBAR_BLOCKS[slot.0]).to_string();
+            text.0 = inventory.slots[slot.0].map_or_else(String::new, |stack| {
+                let name = match stack.item {
+                    Item::Block(WOODEN_DOOR) => "Puerta",
+                    Item::Block(STAIRS) => "Escal.",
+                    Item::Block(BRICKS) => "Ladr.",
+                    Item::Block(PLANKS) => "Tablon",
+                    Item::Block(MUSHROOM) => "Seta",
+                    Item::Block(TORCH) => "Antor.",
+                    item => item_name(item),
+                };
+                format!("{name}\n{}", stack.count)
+            });
         }
     }
 }
@@ -5063,38 +5949,57 @@ fn update_hotbar(
 fn edit_blocks(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
+    (time, mut mining): (Res<Time>, ResMut<MiningState>),
     camera: Query<&Transform, With<Player>>,
     mut mobs: Query<(Entity, &Transform, &mut Mob), Without<Player>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     pointer: Res<PointerState>,
     crafting_ui: Res<CraftingUi>,
-    selected: Res<SelectedBlock>,
+    chat: Res<ChatState>,
+    (selected, selected_slot): (Res<SelectedBlock>, Res<SelectedHotbarSlot>),
     mut inventory: ResMut<Inventory>,
     mut survival: ResMut<Survival>,
-    mut tools: ResMut<CraftedTools>,
     mut world: ResMut<WorldData>,
     mut storage: ResMut<WorldStorage>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if pointer.captured_this_frame || crafting_ui.open {
+    if pointer.captured_this_frame || crafting_ui.open || crafting_ui.inventory_open || chat.open {
+        mining.target = None;
         return;
     }
-    let remove = mouse.just_pressed(MouseButton::Left);
     let place = mouse.just_pressed(MouseButton::Right);
+    let remove = mouse.pressed(MouseButton::Left) && !place;
     if !remove && !place {
+        mining.target = None;
         return;
     }
     let Ok(window) = windows.get_single() else {
+        mining.target = None;
         return;
     };
     if window.cursor_options.grab_mode != CursorGrabMode::Locked {
+        mining.target = None;
         return;
     }
     let Ok(transform) = camera.get_single() else {
+        mining.target = None;
         return;
     };
 
+    if place {
+        mining.target = None;
+        if inventory.slots[selected_slot.0].is_some_and(|stack| stack.item == Item::BerryRation)
+            && survival.hunger < MAX_HUNGER
+        {
+            item_inventory::take_one(&mut inventory.slots[selected_slot.0]);
+            survival.hunger =
+                (survival.hunger + FoodType::BerryRation.saturation()).min(MAX_HUNGER);
+            survival.notice = "Comiste una ración.".into();
+            survival.notice_elapsed = 2.0;
+            return;
+        }
+    }
     let direction = transform.rotation * Vec3::NEG_Z;
     let block_hit = raycast_with_distance(&world, transform.translation, direction, REACH);
     if remove {
@@ -5112,27 +6017,43 @@ fn edit_blocks(
             .min_by(|left, right| left.2.total_cmp(&right.2));
         if let Some((entity, kind, distance)) = mob_hit {
             if block_hit.is_none_or(|(_, _, block_distance)| distance <= block_distance) {
+                mining.target = None;
+                if !mouse.just_pressed(MouseButton::Left) {
+                    return;
+                }
                 let Ok((_, _, mut mob)) = mobs.get_mut(entity) else {
                     return;
                 };
-                let damage = if tools.sword_durability > 0 {
-                    tools.sword_durability = tools.sword_durability.saturating_sub(1);
-                    2
+                let sword = matches!(
+                    inventory.slots[selected_slot.0],
+                    Some(ItemStack {
+                        item: Item::Tool {
+                            kind: ToolKind::Sword,
+                            ..
+                        },
+                        ..
+                    })
+                );
+                let remaining = if sword {
+                    wear_selected_tool(&mut inventory, selected_slot.0)
                 } else {
-                    1
+                    None
                 };
+                let damage = if sword { 2 } else { 1 };
                 mob.health = mob.health.saturating_sub(damage);
                 if mob.health == 0 {
                     commands.entity(entity).despawn_recursive();
                     let (food, experience) = mob_rewards(kind);
                     survival.food = survival.food.saturating_add(food).min(99);
                     survival.experience = survival.experience.saturating_add(experience);
-                    if tools.sword_durability == 0 && damage == 2 {
+                    if remaining == Some(0) {
                         survival.notice = "La espada se rompió.".into();
                         survival.notice_elapsed = 4.0;
                     } else {
                         survival.notice = match kind {
-                            MobKind::Grazer if food > 0 => "Conseguiste carne y experiencia.".into(),
+                            MobKind::Grazer if food > 0 => {
+                                "Conseguiste carne y experiencia.".into()
+                            }
                             MobKind::Grazer => "Derrotaste al animal; la comida está llena.".into(),
                             MobKind::NightStalker => {
                                 "Derrotaste al acechador y ganaste experiencia.".into()
@@ -5152,9 +6073,43 @@ fn edit_blocks(
         }
     }
     let Some((hit, previous, _)) = block_hit else {
+        mining.target = None;
         return;
     };
-    
+
+    if remove {
+        let block = block_at(&world, hit);
+        let tool = selected_mining_tool(block, inventory.slots[selected_slot.0]);
+        if block_definition(block).requires_pickaxe && tool != Some(MiningTool::Pickaxe) {
+            mining.target = None;
+            survival.notice = "Necesitas un pico para extraer este mineral.".into();
+            survival.notice_elapsed = 2.0;
+            return;
+        }
+        let duration = mining_duration(block, tool);
+        let target = mining.target.get_or_insert(MiningTarget {
+            position: hit,
+            block,
+            tool,
+            elapsed: 0.0,
+            duration,
+        });
+        if target.position != hit || target.block != block || target.tool != tool {
+            *target = MiningTarget {
+                position: hit,
+                block,
+                tool,
+                elapsed: 0.0,
+                duration,
+            };
+        }
+        target.elapsed += time.delta_secs();
+        if target.elapsed < target.duration {
+            return;
+        }
+        mining.target = None;
+    }
+
     // Check for door interaction (right click on door)
     if place {
         let (door_chunk_coord, door_local) = block_address(hit);
@@ -5178,7 +6133,7 @@ fn edit_blocks(
             }
         }
     }
-    
+
     let target = if remove { hit } else { previous };
     let (chunk_coord, local) = block_address(target);
     let mut mined_block = None;
@@ -5191,12 +6146,17 @@ fn edit_blocks(
             if current_block == AIR {
                 return;
             }
-            if let Err(block) = inventory.add(current_block) {
-                warn!("Could not add block {block} to inventory");
-                return;
-            }
             chunk.set(local, AIR);
             mined_block = Some(current_block);
+            if let Some(drop) = block_definition(current_block).drop {
+                spawn_block_drop(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    target.as_vec3() + Vec3::splat(0.5),
+                    inventory_item_for_block_drop(drop),
+                );
+            }
             // Spawn particle effects
             spawn_block_particles(
                 &mut commands,
@@ -5211,15 +6171,13 @@ fn edit_blocks(
             }
         } else {
             if current_block != AIR
-                || inventory.count(selected.0) == 0
+                || !inventory.slots[selected_slot.0]
+                    .is_some_and(|stack| stack.item == Item::Block(selected.0))
                 || block_overlaps_player(target, transform.translation)
             {
                 return;
             }
-            if !inventory.remove(selected.0) {
-                warn!("Selected block inventory changed before placement");
-                return;
-            }
+            item_inventory::take_one(&mut inventory.slots[selected_slot.0]);
             chunk.set(local, selected.0);
             // Initialize door state if placing a door
             if selected.0 == WOODEN_DOOR {
@@ -5231,12 +6189,21 @@ fn edit_blocks(
         survival.experience = survival
             .experience
             .saturating_add(experience_for_block(block));
-        if let Some(durability) = tool_durability_for_block(block, &mut tools) {
-            if inventory.add(block).is_ok() {
-                survival.experience = survival
-                    .experience
-                    .saturating_add(experience_for_block(block));
+        if selected_mining_tool(block, inventory.slots[selected_slot.0]).is_some() {
+            let durability = wear_selected_tool(&mut inventory, selected_slot.0)
+                .expect("selected mining tool exists");
+            if let Some(drop) = block_definition(block).drop {
+                spawn_block_drop(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    target.as_vec3() + Vec3::splat(0.5) + Vec3::Y * 0.15,
+                    inventory_item_for_block_drop(drop),
+                );
             }
+            survival.experience = survival
+                .experience
+                .saturating_add(experience_for_block(block));
             if durability == 0 {
                 survival.notice = "La herramienta se rompió.".into();
                 survival.notice_elapsed = 4.0;
@@ -5263,20 +6230,42 @@ fn edit_blocks(
     mark_dirty(&mut world, chunk_coord, local);
 }
 
-fn tool_durability_for_block(block: u8, tools: &mut CraftedTools) -> Option<u32> {
-    let durability = match block {
-        STONE if tools.pickaxe_durability > 0 => &mut tools.pickaxe_durability,
-        WOOD | LEAVES if tools.axe_durability > 0 => &mut tools.axe_durability,
-        SAND | DIRT if tools.shovel_durability > 0 => {
-            // Pala es 2x más eficiente en arena y tierra
-            let durability = &mut tools.shovel_durability;
-            *durability = durability.saturating_sub(1);
-            return Some(*durability);
-        }
+fn selected_mining_tool(block: u8, stack: Option<ItemStack>) -> Option<MiningTool> {
+    let kind = match stack?.item {
+        Item::Tool { kind, .. } => kind,
         _ => return None,
     };
+    match (block, kind) {
+        (STONE | COAL_ORE | COPPER_ORE | IRON_ORE, ToolKind::Pickaxe) => Some(MiningTool::Pickaxe),
+        (WOOD | LEAVES, ToolKind::Axe) => Some(MiningTool::Axe),
+        (SAND | DIRT, ToolKind::Shovel) => Some(MiningTool::Shovel),
+        _ => None,
+    }
+}
+
+fn wear_selected_tool(inventory: &mut Inventory, slot: usize) -> Option<u32> {
+    let stack = inventory.slots.get_mut(slot)?.as_mut()?;
+    let Item::Tool {
+        ref mut durability, ..
+    } = stack.item
+    else {
+        return None;
+    };
     *durability -= 1;
-    Some(*durability)
+    let remaining = *durability;
+    if remaining == 0 {
+        inventory.slots[slot] = None;
+    }
+    Some(remaining)
+}
+
+fn mining_duration(block: u8, tool: Option<MiningTool>) -> f32 {
+    let base = block_definition(block).hardness;
+    if tool.is_some() {
+        base / 2.0
+    } else {
+        base
+    }
 }
 
 fn block_overlaps_player(block: IVec3, eye_position: Vec3) -> bool {
@@ -5303,21 +6292,43 @@ fn block_overlaps_player(block: IVec3, eye_position: Vec3) -> bool {
 
 fn rebuild_dirty_chunks(
     mut world: ResMut<WorldData>,
+    streaming: Res<ChunkStreamingState>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut chunk_entities: Query<(&ChunkMesh, &Mesh3d)>,
+    chunk_entities: Query<&Mesh3d, With<ChunkMesh>>,
 ) {
     if world.dirty.is_empty() {
         return;
     }
-    let dirty = std::mem::take(&mut world.dirty);
-    for (chunk, mesh_handle) in &mut chunk_entities {
-        if dirty.contains(&chunk.0) {
-            let Some(mesh) = meshes.get_mut(&mesh_handle.0) else {
-                error!("Missing mesh asset for chunk {:?}", chunk.0);
-                continue;
-            };
-            *mesh = rendering::build_chunk_mesh(&world, chunk.0);
+    let mut dirty_chunks = Vec::with_capacity(MAX_DIRTY_CHUNK_MESH_REBUILDS_PER_FRAME);
+    let mut stale_chunks = Vec::new();
+    for coord in world.dirty.iter().copied() {
+        let Some(entity) = streaming.chunk_entities.get(&coord) else {
+            stale_chunks.push(coord);
+            continue;
+        };
+        let Ok(mesh_handle) = chunk_entities.get(*entity) else {
+            stale_chunks.push(coord);
+            continue;
+        };
+        if meshes.get(&mesh_handle.0).is_none() {
+            error!("Missing mesh asset for chunk {coord:?}");
+            stale_chunks.push(coord);
+            continue;
         }
+        dirty_chunks.push((coord, mesh_handle.0.clone()));
+        if dirty_chunks.len() == MAX_DIRTY_CHUNK_MESH_REBUILDS_PER_FRAME {
+            break;
+        }
+    }
+    for coord in stale_chunks {
+        world.dirty.remove(&coord);
+    }
+    for (coord, mesh_handle) in dirty_chunks {
+        let Some(mesh) = meshes.get_mut(&mesh_handle) else {
+            continue;
+        };
+        *mesh = rendering::build_chunk_mesh(&world, coord);
+        world.dirty.remove(&coord);
     }
 }
 
@@ -5405,6 +6416,14 @@ fn ray_delta(direction: f32) -> f32 {
 }
 
 fn block_at(world: &WorldData, position: IVec3) -> u8 {
+    if world.terrain_version >= 2 {
+        if position.y < 0 {
+            return STONE;
+        }
+        if position.y >= WORLD_HEIGHT {
+            return AIR;
+        }
+    }
     let (chunk_coord, local) = block_address(position);
     world
         .chunks
@@ -5415,23 +6434,22 @@ fn block_at(world: &WorldData, position: IVec3) -> u8 {
 fn is_block_solid(world: &WorldData, position: IVec3) -> bool {
     let block = block_at(world, position);
     match block {
-        AIR => false,
         WOODEN_DOOR => {
             // Open doors are not solid for collision
-            let state = world.door_states.get(&position).copied().unwrap_or(DoorState::Closed);
+            let state = world
+                .door_states
+                .get(&position)
+                .copied()
+                .unwrap_or(DoorState::Closed);
             !matches!(state, DoorState::Open)
         }
-        STAIRS | SLAB => {
-            // Stairs and slabs are not fully solid (partial blocks)
-            false
-        }
-        _ => true,
+        _ => block_definition(block).solid,
     }
 }
 
 fn light_level_at(world: &WorldData, position: IVec3) -> f32 {
     // Direct sunlight depends on height above surface
-    let surface_height = terrain_height(position.x, position.z, world.seed);
+    let surface_height = world_terrain_height(world, position.x, position.z);
     let base_light = if position.y >= surface_height {
         15.0 // Full sunlight above surface
     } else {
@@ -5476,7 +6494,7 @@ fn block_index(local: IVec3) -> usize {
     (local.x + CHUNK_SIZE * (local.z + CHUNK_SIZE * local.y)) as usize
 }
 
-fn biome_at(x: i32, z: i32, seed: u64) -> Biome {
+fn legacy_biome_at(x: i32, z: i32, seed: u64) -> Biome {
     let temperature = value_noise(x, z, seed ^ 0xA076_1D64_78BD_642F, 0.012);
     let moisture = value_noise(x, z, seed ^ 0xE703_7ED1_A0B4_28DB, 0.018);
     let mountain = value_noise(x, z, seed ^ 0x8EBC_6AF0_9C88_C6E3, 0.012);
@@ -5497,7 +6515,7 @@ fn biome_at(x: i32, z: i32, seed: u64) -> Biome {
     }
 }
 
-fn terrain_height(x: i32, z: i32, seed: u64) -> i32 {
+fn legacy_terrain_height(x: i32, z: i32, seed: u64) -> i32 {
     let broad = value_noise(x, z, seed ^ 0x9E37_79B9_7F4A_7C15, 0.035);
     let detail = value_noise(x, z, seed ^ 0xBF58_476D_1CE4_E5B9, 0.11);
     let mountain = value_noise(x, z, seed ^ 0x8EBC_6AF0_9C88_C6E3, 0.012);
@@ -5505,6 +6523,209 @@ fn terrain_height(x: i32, z: i32, seed: u64) -> i32 {
     (4.0 + (broad - 0.5) * 8.0 + (detail - 0.5) * 2.0 + mountain_weight * 9.0)
         .round()
         .clamp(1.0, (CHUNK_SIZE - 1) as f32) as i32
+}
+
+fn biome_at(x: i32, z: i32, seed: u64) -> Biome {
+    world::terrain::biome_at(x, z, seed)
+}
+
+fn biome_at_with_height_v2(x: i32, z: i32, seed: u64, height: i32) -> Biome {
+    if (height - SEA_LEVEL).abs() <= 2 {
+        return Biome::Beach;
+    }
+
+    let temperature = value_noise(x, z, seed ^ 0xA076_1D64_78BD_642F, 0.009);
+    let moisture = value_noise(x, z, seed ^ 0xE703_7ED1_A0B4_28DB, 0.012);
+    let mountain = value_noise(x, z, seed ^ 0x8EBC_6AF0_9C88_C6E3, 0.006);
+    let mountain_weight = smoothstep(0.66, 0.86, mountain);
+    let desert_weight =
+        smoothstep(0.46, 0.62, temperature) * (1.0 - smoothstep(0.42, 0.60, moisture));
+    let forest_weight = smoothstep(0.50, 0.68, moisture);
+
+    if mountain_weight > 0.62 {
+        Biome::Mountain
+    } else if desert_weight > 0.22 {
+        Biome::Desert
+    } else if forest_weight > 0.38 {
+        Biome::Forest
+    } else {
+        Biome::Plains
+    }
+}
+
+fn world_biome_at(world: &WorldData, x: i32, z: i32) -> Biome {
+    if world.terrain_version >= TERRAIN_VERSION {
+        biome_at(x, z, world.seed)
+    } else if world.terrain_version >= 2 {
+        biome_at_with_height_v2(x, z, world.seed, terrain_height_v2(x, z, world.seed))
+    } else {
+        legacy_biome_at(x, z, world.seed)
+    }
+}
+
+fn world_terrain_height(world: &WorldData, x: i32, z: i32) -> i32 {
+    terrain_height_for_version(x, z, world.seed, world.terrain_version)
+}
+
+fn terrain_height_for_version(x: i32, z: i32, seed: u64, version: u32) -> i32 {
+    if version >= TERRAIN_VERSION {
+        terrain_height(x, z, seed)
+    } else if version >= 2 {
+        terrain_height_v2(x, z, seed)
+    } else {
+        legacy_terrain_height(x, z, seed)
+    }
+}
+
+fn world_spawn_point(seed: u64, version: u32) -> (f32, i32, f32) {
+    let center = IVec2::new(8, 8);
+    for radius in (0_i32..=256).step_by(2) {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                if radius > 0 && dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                let x = center.x + dx;
+                let z = center.y + dz;
+                let Some(height) = dry_spawn_column(seed, version, x, z) else {
+                    continue;
+                };
+                if height <= SEA_LEVEL + 5 || height >= WORLD_HEIGHT - 4 {
+                    continue;
+                }
+                if version >= TERRAIN_VERSION
+                    && (!spawn_site_is_dry(seed, version, x, z)
+                        || !spawn_site_has_relief(seed, x, z)
+                        || !spawn_site_has_block_variety(seed, x, z))
+                {
+                    continue;
+                }
+                if height > SEA_LEVEL + 5 && height < WORLD_HEIGHT - 4 {
+                    return (x as f32 + 0.5, height, z as f32 + 0.5);
+                }
+            }
+        }
+    }
+
+    // The normal search also asks for local relief. Keep expanding until we
+    // find a dry, layered site even if an unusual seed has an exceptionally
+    // flat starting region.
+    for radius in (258_i32..=4096).step_by(8) {
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                let x = center.x + dx;
+                let z = center.y + dz;
+                let Some(height) = dry_spawn_column(seed, version, x, z) else {
+                    continue;
+                };
+                if height <= SEA_LEVEL + 5 || height >= WORLD_HEIGHT - 4 {
+                    continue;
+                }
+                if version < TERRAIN_VERSION
+                    || (spawn_site_is_dry(seed, version, x, z)
+                        && spawn_site_has_block_variety(seed, x, z)
+                        && spawn_site_has_relief(seed, x, z))
+                {
+                    return (x as f32 + 0.5, height, z as f32 + 0.5);
+                }
+            }
+        }
+    }
+
+    panic!("No se encontró un punto de aparición seco y variado para la semilla {seed}");
+}
+
+fn dry_spawn_column(seed: u64, version: u32, x: i32, z: i32) -> Option<i32> {
+    let (height, has_water) = if version >= TERRAIN_VERSION {
+        let (height, water_level) = world::terrain::terrain_profile(x, z, seed);
+        (height, water_level.is_some() || height < SEA_LEVEL)
+    } else {
+        let height = terrain_height_for_version(x, z, seed, version);
+        (height, height < SEA_LEVEL)
+    };
+    (!has_water).then_some(height)
+}
+
+fn spawn_site_is_dry(seed: u64, version: u32, x: i32, z: i32) -> bool {
+    (-1..=1).all(|dz| {
+        (-1..=1).all(|dx| {
+            dry_spawn_column(seed, version, x + dx, z + dz)
+                .is_some_and(|height| height > SEA_LEVEL + 1)
+        })
+    })
+}
+
+fn spawn_site_has_relief(seed: u64, x: i32, z: i32) -> bool {
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    for (dx, dz) in [
+        (-16, 0),
+        (16, 0),
+        (0, -16),
+        (0, 16),
+        (-12, -12),
+        (-12, 12),
+        (12, -12),
+        (12, 12),
+    ] {
+        let height = terrain_height(x + dx, z + dz, seed);
+        minimum = minimum.min(height);
+        maximum = maximum.max(height);
+    }
+    maximum - minimum >= 2
+}
+
+fn spawn_site_has_block_variety(seed: u64, x: i32, z: i32) -> bool {
+    let biome = biome_at(x, z, seed);
+    let height = terrain_height(x, z, seed);
+    if height <= SEA_LEVEL + 5 {
+        return false;
+    }
+    // Reject solid-rock caps and require a real surface cap above deeper stone.
+    !matches!(biome, Biome::Volcano | Biome::Cave)
+        && (biome.surface_block() != STONE || biome == Biome::Mountain)
+}
+
+fn terrain_height(x: i32, z: i32, seed: u64) -> i32 {
+    world::terrain::terrain_height(x, z, seed)
+}
+
+fn terrain_height_v2(x: i32, z: i32, seed: u64) -> i32 {
+    let continent = value_noise(x, z, seed ^ 0x9E37_79B9_7F4A_7C15, 0.0025);
+    let rolling = value_noise(x, z, seed ^ 0xBF58_476D_1CE4_E5B9, 0.008);
+    let detail = value_noise(x, z, seed ^ 0x94D0_49BB_1331_11EB, 0.04);
+    let mountain = value_noise(x, z, seed ^ 0x8EBC_6AF0_9C88_C6E3, 0.006);
+    let land_weight = smoothstep(0.34, 0.66, continent);
+    let mountain_weight = smoothstep(0.68, 0.86, mountain);
+    let mut height = (32.0
+        + land_weight * 34.0
+        + (rolling - 0.5) * 18.0
+        + (detail - 0.5) * 4.0
+        + mountain_weight * 42.0)
+        .round()
+        .clamp(8.0, (WORLD_HEIGHT - 16) as f32) as i32;
+
+    let river = value_noise(x, z, seed ^ 0xD1B5_4A32_D192_ED03, 0.008);
+    if (river - 0.5).abs() < 0.025 && height > SEA_LEVEL - 2 {
+        height = SEA_LEVEL - 2;
+    }
+    height
+}
+
+fn is_cave_v2(x: i32, y: i32, z: i32, seed: u64) -> bool {
+    if y <= 5 {
+        return false;
+    }
+    let tunnel = value_noise_3d(x, y, z, seed ^ 0xC0FF_EE12_3456_7890, 0.035);
+    let chamber = value_noise_3d(x, y, z, seed ^ 0x91E1_0DA5_C79E_7B1D, 0.065);
+    (tunnel - 0.5).abs() < 0.045 && chamber > 0.38
+}
+
+fn is_cave(x: i32, y: i32, z: i32, seed: u64) -> bool {
+    world::terrain::is_cave(x, y, z, seed)
 }
 
 fn value_noise(x: i32, z: i32, seed: u64, scale: f32) -> f32 {
@@ -5527,8 +6748,45 @@ fn value_noise(x: i32, z: i32, seed: u64, scale: f32) -> f32 {
     lerp(top, bottom, fraction_z)
 }
 
+fn value_noise_3d(x: i32, y: i32, z: i32, seed: u64, scale: f32) -> f32 {
+    let scaled_x = x as f32 * scale;
+    let scaled_y = y as f32 * scale;
+    let scaled_z = z as f32 * scale;
+    let grid_x = scaled_x.floor() as i32;
+    let grid_y = scaled_y.floor() as i32;
+    let grid_z = scaled_z.floor() as i32;
+    let fraction_x = smoothstep(0.0, 1.0, scaled_x - grid_x as f32);
+    let fraction_y = smoothstep(0.0, 1.0, scaled_y - grid_y as f32);
+    let fraction_z = smoothstep(0.0, 1.0, scaled_z - grid_z as f32);
+    let plane = |offset_y| {
+        let top = lerp(
+            hash_value_3d(grid_x, grid_y + offset_y, grid_z, seed),
+            hash_value_3d(grid_x + 1, grid_y + offset_y, grid_z, seed),
+            fraction_x,
+        );
+        let bottom = lerp(
+            hash_value_3d(grid_x, grid_y + offset_y, grid_z + 1, seed),
+            hash_value_3d(grid_x + 1, grid_y + offset_y, grid_z + 1, seed),
+            fraction_x,
+        );
+        lerp(top, bottom, fraction_z)
+    };
+    lerp(plane(0), plane(1), fraction_y)
+}
+
 fn hash_value(x: i32, z: i32, seed: u64) -> f32 {
     (coordinate_hash(x, z, seed) >> 40) as f32 / (1_u32 << 24) as f32
+}
+
+fn hash_value_3d(x: i32, y: i32, z: i32, seed: u64) -> f32 {
+    let mut value = seed
+        ^ (x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (z as i64 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    (value >> 40) as f32 / (1_u32 << 24) as f32
 }
 
 fn coordinate_hash(x: i32, z: i32, seed: u64) -> u64 {
@@ -5551,6 +6809,8 @@ fn player_rotation(yaw: f32, pitch: f32) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::asset::{AssetApp, AssetPlugin};
+    use bevy::state::app::StatesPlugin;
 
     fn temporary_world_path() -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -5560,6 +6820,695 @@ mod tests {
         std::env::temp_dir()
             .join(format!("the-cubes-test-{}-{nonce}", std::process::id()))
             .join("world.ron")
+    }
+
+    fn mining_test_app(block: u8, tools: CraftedTools) -> (App, Entity, Entity) {
+        let mut world = WorldData::default();
+        let mut chunk = Chunk::new();
+        chunk.set(IVec3::new(0, 1, 2), block);
+        world.chunks.insert(IVec3::ZERO, chunk);
+        let mut images = Assets::<Image>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let visuals = MiningVisuals {
+            materials: create_mining_materials(&mut images, &mut materials),
+        };
+        let overlay_material = visuals.materials[0].clone();
+        let mut inventory = Inventory::default();
+        for (kind, durability) in [
+            (ToolKind::Pickaxe, tools.pickaxe_durability),
+            (ToolKind::Axe, tools.axe_durability),
+            (ToolKind::Shovel, tools.shovel_durability),
+            (ToolKind::Sword, tools.sword_durability),
+        ] {
+            if durability > 0 {
+                inventory
+                    .try_add(Item::Tool { kind, durability }, 1)
+                    .unwrap();
+            }
+        }
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(PointerState::default())
+            .insert_resource(CraftingUi::default())
+            .insert_resource(ChatState::default())
+            .insert_resource(SelectedBlock::default())
+            .insert_resource(inventory)
+            .insert_resource(SelectedHotbarSlot::default())
+            .insert_resource(Survival::default())
+            .insert_resource(tools)
+            .insert_resource(MiningState::default())
+            .insert_resource(visuals)
+            .insert_resource(world)
+            .insert_resource(WorldStorage::default())
+            .insert_resource(images)
+            .insert_resource(materials)
+            .init_resource::<Assets<Mesh>>()
+            .add_systems(Update, (edit_blocks, update_mining_visual).chain());
+        let mut window = Window::default();
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+        app.world_mut().spawn((window, PrimaryWindow));
+        let player = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.5, 1.5, 4.5),
+                Player {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    velocity: Vec3::ZERO,
+                    grounded: false,
+                    flying: false,
+                    jump_buffer: 0.0,
+                    coyote_time: 0.0,
+                    step_up_remaining: 0.0,
+                    jump_key_down: false,
+                    flight_key_down: false,
+                },
+            ))
+            .id();
+        let overlay = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Visibility::Hidden,
+                MeshMaterial3d(overlay_material),
+                MiningOverlay,
+            ))
+            .id();
+        (app, player, overlay)
+    }
+
+    fn mining_tick(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(seconds));
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+    }
+
+    #[test]
+    fn inventory_ui_moves_crafts_and_equips_items() {
+        let mut app = App::new();
+        let mut inventory = Inventory::default();
+        inventory.try_add(Item::Block(WOOD), 1).unwrap();
+        app.insert_resource(inventory)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<CraftingUi>()
+            .init_resource::<ChatState>()
+            .init_resource::<SelectedBlock>()
+            .init_resource::<SelectedHotbarSlot>()
+            .add_systems(
+                Update,
+                (
+                    inventory_controls,
+                    inventory_clicks,
+                    sync_selected_block,
+                    update_inventory_ui,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.world_mut().spawn((Node::default(), InventoryPanel));
+        let slot0 = app
+            .world_mut()
+            .spawn((Interaction::None, InventoryTarget::Slot(0)))
+            .id();
+        let grid0 = app
+            .world_mut()
+            .spawn((Interaction::None, InventoryTarget::Small(0)))
+            .id();
+        let result = app
+            .world_mut()
+            .spawn((Interaction::None, InventoryTarget::SmallResult))
+            .id();
+        let slot1 = app
+            .world_mut()
+            .spawn((Interaction::None, InventoryTarget::Slot(1)))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.update();
+        assert!(app.world().resource::<CraftingUi>().inventory_open);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyE);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        for entity in [slot0, grid0, result, slot1] {
+            *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Hovered;
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .release(MouseButton::Left);
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .clear();
+            *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::None;
+        }
+        let inventory = app.world().resource::<Inventory>();
+        assert_eq!(
+            inventory.slots[1],
+            Some(ItemStack {
+                item: Item::Block(PLANKS),
+                count: 4
+            })
+        );
+        assert!(inventory.cursor.is_none());
+        assert!(inventory.small_grid.iter().all(Option::is_none));
+        app.world_mut().resource_mut::<SelectedHotbarSlot>().0 = 1;
+        app.update();
+        assert_eq!(app.world().resource::<SelectedBlock>().0, PLANKS);
+    }
+
+    #[test]
+    fn world_save_restores_slots_cursor_grids_and_selected_tool() {
+        let mut inventory = Inventory::default();
+        inventory.slots[3] = Some(ItemStack {
+            item: Item::Tool {
+                kind: ToolKind::Sword,
+                durability: 15,
+            },
+            count: 1,
+        });
+        inventory.cursor = Some(ItemStack {
+            item: Item::Block(STONE),
+            count: 3,
+        });
+        inventory.small_grid[1] = Some(ItemStack {
+            item: Item::Block(WOOD),
+            count: 4,
+        });
+        inventory.large_grid[8] = Some(ItemStack {
+            item: Item::Arrow,
+            count: 5,
+        });
+        let player = Player {
+            yaw: 0.0,
+            pitch: 0.0,
+            velocity: Vec3::ZERO,
+            grounded: false,
+            flying: false,
+            jump_buffer: 0.0,
+            coyote_time: 0.0,
+            step_up_remaining: 0.0,
+            jump_key_down: false,
+            flight_key_down: false,
+        };
+        let world = WorldData {
+            name: "Prueba".into(),
+            ..default()
+        };
+        let save = snapshot_world(
+            &world,
+            Vec3::ZERO,
+            &player,
+            &inventory,
+            AIR,
+            3,
+            DEFAULT_TIME_OF_DAY_SECONDS,
+            &Survival::default(),
+            &CraftedTools::default(),
+        );
+        let encoded = ron::to_string(&save).unwrap();
+        let loaded: WorldSave = ron::from_str(&encoded).unwrap();
+        validate_world_save(&loaded).unwrap();
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<LoadingProgress>()
+            .init_resource::<WorldData>()
+            .init_resource::<DayNightCycle>()
+            .init_resource::<Inventory>()
+            .init_resource::<Survival>()
+            .init_resource::<CraftedTools>()
+            .init_resource::<CraftingUi>()
+            .init_resource::<SelectedBlock>()
+            .init_resource::<SelectedHotbarSlot>()
+            .init_resource::<WorldStorage>()
+            .init_resource::<ChunkStreamingState>()
+            .insert_resource(PendingWorld {
+                save: Some(loaded),
+                ..default()
+            })
+            .add_systems(Update, begin_loading_world);
+        app.update();
+        let restored = app.world().resource::<Inventory>();
+        assert_eq!(restored.slots, inventory.slots);
+        assert_eq!(restored.cursor, inventory.cursor);
+        assert_eq!(restored.small_grid, inventory.small_grid);
+        assert_eq!(restored.large_grid, inventory.large_grid);
+        assert_eq!(app.world().resource::<SelectedHotbarSlot>().0, 3);
+        assert_eq!(app.world().resource::<SelectedBlock>().0, AIR);
+    }
+
+    #[test]
+    fn mining_requires_hold_and_shows_progress_until_the_block_breaks() {
+        let (mut app, _, overlay) = mining_test_app(STONE, CraftedTools::default());
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 2.9);
+        let position = IVec3::new(0, 1, 2);
+        assert_eq!(
+            block_at(app.world().resource::<WorldData>(), position),
+            STONE
+        );
+        assert_eq!(app.world().resource::<Inventory>().count(STONE), 0);
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(
+            app.world().get::<Transform>(overlay).unwrap().translation,
+            position.as_vec3() + Vec3::splat(0.5)
+        );
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(overlay)
+                .unwrap()
+                .0,
+            app.world().resource::<MiningVisuals>().materials[7]
+        );
+        mining_tick(&mut app, 0.11);
+        assert_eq!(block_at(app.world().resource::<WorldData>(), position), AIR);
+        assert_eq!(app.world().resource::<Inventory>().count(STONE), 1);
+        assert_eq!(app.world().resource::<Survival>().experience, 2);
+        assert!(app
+            .world()
+            .resource::<WorldStorage>()
+            .dirty_chunks
+            .contains(&IVec3::ZERO));
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    fn mining_tools_halve_time_and_only_wear_after_a_successful_break() {
+        let tools = CraftedTools {
+            pickaxe_durability: 1,
+            ..default()
+        };
+        let (mut app, _, _) = mining_test_app(STONE, tools);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 1.49);
+        assert!(matches!(
+            app.world().resource::<Inventory>().slots[0],
+            Some(ItemStack {
+                item: Item::Tool {
+                    kind: ToolKind::Pickaxe,
+                    durability: 1
+                },
+                ..
+            })
+        ));
+        assert_eq!(app.world().resource::<Inventory>().count(STONE), 0);
+        mining_tick(&mut app, 0.02);
+        assert!(app.world().resource::<Inventory>().slots[0].is_none());
+        assert_eq!(app.world().resource::<Inventory>().count(STONE), 2);
+        assert_eq!(app.world().resource::<Survival>().experience, 4);
+        assert_eq!(mining_duration(DIRT, Some(MiningTool::Shovel)), 0.4);
+        assert_eq!(mining_duration(WOOD, Some(MiningTool::Axe)), 1.0);
+        assert_eq!(mining_duration(STONE, None), 3.0);
+        assert_eq!(
+            selected_mining_tool(STONE, app.world().resource::<Inventory>().slots[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn mining_resets_on_release_target_change_and_open_inventory() {
+        let (mut app, player, overlay) = mining_test_app(STONE, CraftedTools::default());
+        app.world_mut()
+            .resource_mut::<WorldData>()
+            .chunks
+            .get_mut(&IVec3::ZERO)
+            .unwrap()
+            .set(IVec3::new(1, 1, 2), STONE);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 1.0);
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .unwrap()
+            .translation
+            .x = 1.5;
+        mining_tick(&mut app, 0.25);
+        let target = app.world().resource::<MiningState>().target.unwrap();
+        assert_eq!(target.position, IVec3::new(1, 1, 2));
+        assert!((target.elapsed - 0.25).abs() < 0.001);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        mining_tick(&mut app, 0.1);
+        assert!(app.world().resource::<MiningState>().target.is_none());
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Hidden
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 0.25);
+        app.world_mut().resource_mut::<CraftingUi>().inventory_open = true;
+        mining_tick(&mut app, 0.25);
+        assert!(app.world().resource::<MiningState>().target.is_none());
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            block_at(app.world().resource::<WorldData>(), IVec3::new(1, 1, 2)),
+            STONE
+        );
+    }
+
+    #[test]
+    fn holding_attack_does_not_repeat_mob_hits_or_mine_through_mobs() {
+        let tools = CraftedTools {
+            sword_durability: 3,
+            ..default()
+        };
+        let (mut app, _, _) = mining_test_app(STONE, tools);
+        let mob = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.5, 0.7, 3.0),
+                Mob {
+                    kind: MobKind::Grazer,
+                    health: 6,
+                    attack_elapsed: 0.0,
+                    wander_elapsed: 0.0,
+                    wander_angle: 0.0,
+                    wander_step: 0,
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 0.25);
+        mining_tick(&mut app, 3.0);
+        assert_eq!(app.world().get::<Mob>(mob).unwrap().health, 4);
+        assert!(matches!(
+            app.world().resource::<Inventory>().slots[0],
+            Some(ItemStack {
+                item: Item::Tool {
+                    kind: ToolKind::Sword,
+                    durability: 2
+                },
+                ..
+            })
+        ));
+        assert!(app.world().resource::<MiningState>().target.is_none());
+        assert_eq!(
+            block_at(app.world().resource::<WorldData>(), IVec3::new(0, 1, 2)),
+            STONE
+        );
+    }
+
+    #[test]
+    fn right_click_cancels_mining_and_still_places_blocks() {
+        let (mut app, _, overlay) = mining_test_app(STONE, CraftedTools::default());
+        app.world_mut()
+            .resource_mut::<Inventory>()
+            .try_add(Item::Block(GRASS), 1)
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        mining_tick(&mut app, 1.0);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        mining_tick(&mut app, 0.1);
+        assert!(app.world().resource::<MiningState>().target.is_none());
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            block_at(app.world().resource::<WorldData>(), IVec3::new(0, 1, 2)),
+            STONE
+        );
+        assert_eq!(
+            block_at(app.world().resource::<WorldData>(), IVec3::new(0, 1, 3)),
+            GRASS
+        );
+        assert_eq!(app.world().resource::<Inventory>().count(GRASS), 0);
+    }
+
+    #[test]
+    fn pausing_clears_mining_progress_and_hides_overlay() {
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<MiningState>()
+            .add_systems(OnExit(AppState::InGame), reset_mining);
+        let overlay = app
+            .world_mut()
+            .spawn((Visibility::Visible, MiningOverlay))
+            .id();
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        app.world_mut().resource_mut::<MiningState>().target = Some(MiningTarget {
+            position: IVec3::ZERO,
+            block: STONE,
+            tool: None,
+            elapsed: 1.0,
+            duration: 3.0,
+        });
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert!(app.world().resource::<MiningState>().target.is_none());
+        assert_eq!(
+            *app.world().get::<Visibility>(overlay).unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    fn mining_cracks_increase_with_each_stage() {
+        let mut images = Assets::<Image>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let stages = create_mining_materials(&mut images, &mut materials);
+        assert_eq!(stages.len(), MINING_CRACK_STAGES);
+        let mut previous_count = 0;
+        for handle in stages {
+            let material = materials.get(&handle).unwrap();
+            let image = images
+                .get(material.base_color_texture.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(image.texture_descriptor.size.width, 32);
+            assert_eq!(image.texture_descriptor.size.height, 32);
+            let count = image
+                .data
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] != 0)
+                .count();
+            assert!(count > previous_count);
+            assert!(count < 32 * 32);
+            previous_count = count;
+        }
+    }
+
+    #[test]
+    fn loading_creates_player_and_textured_chunks_before_saving() {
+        let path = temporary_world_path();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), StatesPlugin))
+            .init_asset::<Image>()
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_state::<AppState>()
+            .init_resource::<TextureAssets>()
+            .init_resource::<MobAssets>()
+            .init_resource::<PendingWorld>()
+            .init_resource::<LoadingProgress>()
+            .init_resource::<WorldData>()
+            .init_resource::<Inventory>()
+            .init_resource::<Survival>()
+            .init_resource::<CraftedTools>()
+            .init_resource::<MiningState>()
+            .init_resource::<MiningVisuals>()
+            .init_resource::<SelectedBlock>()
+            .init_resource::<SelectedHotbarSlot>()
+            .init_resource::<DayNightCycle>()
+            .insert_resource(WorldStorage {
+                path: Some(path.clone()),
+                ..default()
+            })
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(WorldScenePlugin)
+            .add_systems(
+                Update,
+                loading_world_step.run_if(in_state(AppState::LoadingWorld)),
+            )
+            .add_systems(
+                Update,
+                pause_menu_actions.run_if(in_state(AppState::Paused)),
+            );
+
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::LoadingWorld);
+        app.update();
+        let atlas = app
+            .world()
+            .resource::<TextureAssets>()
+            .atlas
+            .clone()
+            .expect("atlas created");
+        assert!(app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&atlas)
+            .is_some());
+
+        {
+            let mut world = app.world_mut().resource_mut::<WorldData>();
+            world.name = "Prueba".into();
+            world.chunks.insert(IVec3::ZERO, Chunk::new());
+        }
+        {
+            let mut progress = app.world_mut().resource_mut::<LoadingProgress>();
+            progress.initialized = true;
+            progress.stage = LoadingStage::Meshes;
+            progress.coordinates.push(IVec3::ZERO);
+            progress.total = 1;
+        }
+        app.update();
+        let material = app
+            .world()
+            .resource::<LoadingProgress>()
+            .material
+            .clone()
+            .unwrap();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .base_color_texture,
+            Some(atlas)
+        );
+        app.update();
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<Player>>()
+            .single(app.world());
+        let position = app.world().get::<Transform>(player).unwrap().translation;
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Player>>()
+                .single(app.world()),
+            player
+        );
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        app.world_mut()
+            .spawn((Interaction::Pressed, MenuAction(MenuCommand::SaveAndMenu)));
+        app.update();
+        let save = load_world(&path).expect("player and world saved");
+        assert_eq!(save.player_position, position.to_array());
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::MainMenu
+        );
+        fs::remove_file(&path).expect("remove temporary world file");
+        fs::remove_dir(path.parent().unwrap()).expect("remove temporary world directory");
+    }
+
+    #[test]
+    fn generated_atlas_contains_each_block_texture_and_grass_top() {
+        use bevy::image::{CompressedImageFormats, ImageType};
+
+        let atlas = include_bytes!(concat!(env!("OUT_DIR"), "/block_atlas.rgba"));
+        let size = texture_layout::ATLAS_SIZE as usize;
+        let tile_size = texture_layout::TILE_SIZE as usize;
+        assert_eq!(atlas.len(), size * size * 4);
+        let mut tiles = HashSet::new();
+        for &(tile, filename) in texture_layout::TEXTURE_FILES {
+            assert!(tiles.insert(tile), "duplicate tile {tile}");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/blocks")
+                .join(filename);
+            let bytes = fs::read(&path).expect("read source texture");
+            let image = Image::from_buffer(
+                &bytes,
+                ImageType::Extension("png"),
+                CompressedImageFormats::NONE,
+                true,
+                ImageSampler::nearest(),
+                RenderAssetUsages::MAIN_WORLD,
+            )
+            .expect("decode source texture");
+            assert_eq!(image.texture_descriptor.size.width as usize, tile_size);
+            assert_eq!(image.texture_descriptor.size.height as usize, tile_size);
+            let x = tile % texture_layout::ATLAS_COLUMNS as usize * tile_size;
+            let y = tile / texture_layout::ATLAS_COLUMNS as usize * tile_size;
+            for row in 0..tile_size {
+                let offset = ((y + row) * size + x) * 4;
+                let source = row * tile_size * 4;
+                assert_eq!(
+                    &atlas[offset..offset + tile_size * 4],
+                    &image.data[source..source + tile_size * 4],
+                    "{filename}, row {row}"
+                );
+            }
+        }
+        for tile in 1..BLOCK_COUNT {
+            assert!(tiles.contains(&tile), "missing block tile {tile}");
+        }
+        let (grass_top, _, _, _) = rendering::block_uv(GRASS, 2, 0);
+        let (grass_side, _, _, _) = rendering::block_uv(GRASS, 0, 0);
+        let top_tile = texture_layout::texture_index("grass_top");
+        let side_tile = texture_layout::texture_index("grass_side");
+        assert_eq!(
+            grass_top,
+            [
+                (top_tile % texture_layout::ATLAS_COLUMNS as usize) as f32 / 16.0,
+                (top_tile / texture_layout::ATLAS_COLUMNS as usize) as f32 / 16.0,
+            ]
+        );
+        assert_eq!(
+            grass_side,
+            [
+                (side_tile % texture_layout::ATLAS_COLUMNS as usize) as f32 / 16.0,
+                (side_tile / texture_layout::ATLAS_COLUMNS as usize + 1) as f32 / 16.0,
+            ]
+        );
     }
 
     #[test]
@@ -5589,9 +7538,77 @@ mod tests {
         assert_ne!(terrain_height(13, -9, 123), terrain_height(13, -9, 999_999));
         for x in -128..128 {
             for z in -128..128 {
-                assert!((1..CHUNK_SIZE).contains(&terrain_height(x, z, 42)));
+                let height = terrain_height(x, z, 42);
+                assert!((8..=WORLD_HEIGHT - 16).contains(&height), "height {height}");
             }
         }
+    }
+
+    #[test]
+    fn new_worlds_generate_connected_vertical_terrain_and_preserve_legacy_worlds() {
+        let seed = 42;
+        let mut found_cave = false;
+        let mut found_water = false;
+        'search: for z in -64..64 {
+            for x in -64..64 {
+                let height = terrain_height(x, z, seed);
+                if !found_cave && height > SEA_LEVEL + 8 {
+                    for y in SEA_LEVEL + 1..height - 4 {
+                        if !is_cave(x, y, z, seed) {
+                            continue;
+                        }
+                        let coord = IVec3::new(
+                            x.div_euclid(CHUNK_SIZE),
+                            y.div_euclid(CHUNK_SIZE),
+                            z.div_euclid(CHUNK_SIZE),
+                        );
+                        let local = IVec3::new(
+                            x.rem_euclid(CHUNK_SIZE),
+                            y.rem_euclid(CHUNK_SIZE),
+                            z.rem_euclid(CHUNK_SIZE),
+                        );
+                        assert_eq!(generate_chunk(coord, seed).get(local), AIR);
+                        found_cave = true;
+                        break;
+                    }
+                }
+
+                if !found_water && height < SEA_LEVEL - 1 {
+                    let coord = IVec3::new(
+                        x.div_euclid(CHUNK_SIZE),
+                        SEA_LEVEL.div_euclid(CHUNK_SIZE),
+                        z.div_euclid(CHUNK_SIZE),
+                    );
+                    let local = IVec3::new(
+                        x.rem_euclid(CHUNK_SIZE),
+                        SEA_LEVEL.rem_euclid(CHUNK_SIZE),
+                        z.rem_euclid(CHUNK_SIZE),
+                    );
+                    assert_eq!(generate_chunk(coord, seed).get(local), WATER);
+                    found_water = true;
+                }
+                if found_cave && found_water {
+                    break 'search;
+                }
+            }
+        }
+        assert!(found_cave, "seeded terrain should contain a dry cave");
+        assert!(found_water, "low terrain should fill to sea level");
+
+        let legacy = WorldData {
+            seed,
+            terrain_version: 1,
+            ..default()
+        };
+        let legacy_surface = chunk_for_coordinate(&legacy, IVec3::ZERO);
+        assert_eq!(
+            legacy_surface.blocks,
+            generate_legacy_chunk(IVec3::ZERO, seed).blocks
+        );
+        assert!(chunk_for_coordinate(&legacy, IVec3::Y)
+            .blocks
+            .iter()
+            .all(|block| *block == AIR));
     }
 
     #[test]
@@ -5600,14 +7617,16 @@ mod tests {
         let mut present = HashSet::new();
         let mut found_mountain = false;
         let mut found_desert = false;
-        let deterministic_chunk = generate_chunk(IVec3::new(-4, 0, -4), 42);
+        let deterministic_chunk = generate_chunk(IVec3::new(-4, 3, -4), 42);
+        let mut generated_chunks = HashMap::new();
 
         for chunk_z in -4..=4 {
             for chunk_x in -4..=4 {
-                let coord = IVec3::new(chunk_x, 0, chunk_z);
-                let chunk = generate_chunk(coord, 42);
-                for block in &chunk.blocks {
-                    present.insert(*block);
+                for chunk_y in 0..WORLD_HEIGHT / CHUNK_SIZE {
+                    let coord = IVec3::new(chunk_x, chunk_y, chunk_z);
+                    let chunk = generate_chunk(coord, 42);
+                    present.extend(chunk.blocks.iter().copied());
+                    generated_chunks.insert(coord, chunk);
                 }
                 for z in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
@@ -5615,18 +7634,30 @@ mod tests {
                         let world_z = chunk_z * CHUNK_SIZE + z;
                         let biome = biome_at(world_x, world_z, 42);
                         let height = terrain_height(world_x, world_z, 42);
-                        assert_eq!(chunk.get(IVec3::new(x, height, z)), biome.surface_block());
+                        let coord = IVec3::new(chunk_x, height.div_euclid(CHUNK_SIZE), chunk_z);
+                        let local = IVec3::new(x, height.rem_euclid(CHUNK_SIZE), z);
+                        assert_eq!(
+                            generated_chunks[&coord].get(local),
+                            biome.surface_block(),
+                            "surface at ({world_x}, {height}, {world_z})"
+                        );
                         biomes.insert(biome);
-                        found_mountain |= biome == Biome::Mountain && height >= 12;
+                        found_mountain |= biome == Biome::Mountain && height >= 80;
                         found_desert |= biome == Biome::Desert;
                     }
                 }
             }
         }
 
-        assert!(biomes.contains(&Biome::Plains));
+        assert!(
+            biomes.contains(&Biome::Plains),
+            "generated biomes: {biomes:?}"
+        );
         assert!(biomes.contains(&Biome::Forest));
-        assert!(biomes.contains(&Biome::Desert));
+        assert!(
+            biomes.contains(&Biome::Desert),
+            "generated biomes: {biomes:?}"
+        );
         assert!(biomes.contains(&Biome::Mountain));
         assert!(found_mountain);
         assert!(found_desert);
@@ -5636,16 +7667,18 @@ mod tests {
         assert!(present.contains(&SAND));
         assert!(present.contains(&WOOD));
         assert!(present.contains(&LEAVES));
-        
+        assert!(present.contains(&WATER));
+        assert!(present.iter().all(|block| *block < BLOCK_COUNT as u8));
+
         // Test that new block types are properly defined
         assert_ne!(ICE, AIR);
         assert_ne!(SNOW, AIR);
         assert_ne!(MUD, AIR);
         assert_ne!(OBSIDIAN, AIR);
         assert_ne!(GRAVEL, AIR);
-        
+
         assert_eq!(
-            generate_chunk(IVec3::new(-4, 0, -4), 42).blocks,
+            generate_chunk(IVec3::new(-4, 3, -4), 42).blocks,
             deterministic_chunk.blocks
         );
     }
@@ -5653,13 +7686,16 @@ mod tests {
     #[test]
     fn streaming_coordinates_cover_the_radius_around_negative_centers() {
         let center = IVec3::new(-2, 0, 3);
-        let coordinates = chunk_coordinates_around(center, STREAM_LOAD_RADIUS);
+        let coordinates =
+            chunk_coordinates_around(center, STREAM_LOAD_RADIUS, STREAM_VERTICAL_RADIUS);
 
-        assert_eq!(coordinates.len(), 49);
+        assert_eq!(coordinates.len(), 98);
         assert!(coordinates.contains(&center));
         assert!(coordinates.contains(&IVec3::new(-5, 0, 0)));
         assert!(coordinates.contains(&IVec3::new(1, 0, 6)));
-        assert!(coordinates.iter().all(|coordinate| coordinate.y == 0));
+        assert!(coordinates
+            .iter()
+            .all(|coordinate| (0..=1).contains(&coordinate.y)));
     }
 
     #[test]
@@ -5685,40 +7721,65 @@ mod tests {
     }
 
     #[test]
-    fn greedy_meshing_merges_a_uniform_plane() {
-        let size = CHUNK_SIZE as usize;
-        let mut mask = vec![GRASS; size * size];
-        let mut rectangles = Vec::new();
+    fn adjacent_blocks_keep_separate_faces_and_texture_variants() {
+        let mut chunk = Chunk::new();
+        chunk.set(IVec3::ZERO, STONE);
+        chunk.set(IVec3::X, STONE);
+        let world = WorldData {
+            chunks: HashMap::from([(IVec3::ZERO, chunk)]),
+            ..default()
+        };
+        let mesh = rendering::build_chunk_mesh(&world, IVec3::ZERO);
+        let bevy::render::mesh::VertexAttributeValues::Float32x3(positions) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("block mesh positions must be 3D floats");
+        };
+        let bevy::render::mesh::VertexAttributeValues::Float32x2(uvs) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+        else {
+            panic!("block mesh UVs must be 2D floats");
+        };
 
-        rendering::greedy_rectangles(&mut mask, |u, v, width, height, block| {
-            rectangles.push((u, v, width, height, block));
+        let mut top_faces = positions
+            .chunks_exact(4)
+            .zip(uvs.chunks_exact(4))
+            .filter_map(|(vertices, face_uvs)| {
+                vertices
+                    .iter()
+                    .all(|position| position[1] == 1.0)
+                    .then_some((vertices, face_uvs))
+            })
+            .collect::<Vec<_>>();
+        top_faces.sort_by(|(left, _), (right, _)| {
+            left.iter()
+                .map(|position| position[0])
+                .fold(f32::INFINITY, f32::min)
+                .total_cmp(
+                    &right
+                        .iter()
+                        .map(|position| position[0])
+                        .fold(f32::INFINITY, f32::min),
+                )
         });
 
-        assert_eq!(rectangles, [(0, 0, size, size, GRASS)]);
-        assert!(mask.iter().all(|block| *block == AIR));
-    }
+        assert_eq!(top_faces.len(), 2);
+        for (x, (positions, uvs)) in top_faces.into_iter().enumerate() {
+            let min_x = positions
+                .iter()
+                .map(|position| position[0])
+                .fold(f32::INFINITY, f32::min);
+            let max_x = positions
+                .iter()
+                .map(|position| position[0])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert_eq!(max_x - min_x, 1.0);
+            assert_eq!(min_x, x as f32);
 
-    #[test]
-    fn greedy_meshing_keeps_different_blocks_separate() {
-        let size = CHUNK_SIZE as usize;
-        let mut mask = vec![AIR; size * size];
-        for v in 0..2 {
-            for u in 0..2 {
-                mask[v * size + u] = GRASS;
-            }
+            let variant = rendering::block_variant(x as i32, 0, 0);
+            let (uv0, uv1, uv2, uv3) = rendering::block_uv(STONE, 2, variant);
+            assert_eq!(uvs, [uv0, uv1, uv2, uv3]);
         }
-        mask[2] = STONE;
-        mask[size + 2] = DIRT;
-        let mut rectangles = Vec::new();
-
-        rendering::greedy_rectangles(&mut mask, |u, v, width, height, block| {
-            rectangles.push((u, v, width, height, block));
-        });
-
-        assert_eq!(
-            rectangles,
-            [(0, 0, 2, 2, GRASS), (2, 0, 1, 1, STONE), (2, 1, 1, 1, DIRT)]
-        );
     }
 
     #[test]
@@ -5775,7 +7836,7 @@ mod tests {
         world.chunks.insert(IVec3::ZERO, chunk);
 
         let mut app = App::new();
-        let mut time = Time::<()>::default();
+        let mut time = Time::<Fixed>::default();
         time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         app.insert_resource(time)
             .insert_resource(ButtonInput::<KeyCode>::default())
@@ -5786,16 +7847,24 @@ mod tests {
         window.cursor_options.grab_mode = CursorGrabMode::Locked;
         app.world_mut().spawn((window, PrimaryWindow));
         let start = Vec3::new(0.5, 1.0 + PLAYER_EYE_HEIGHT, 0.5);
-        let entity = app.world_mut().spawn((
-            Transform::from_translation(start),
-            Player {
-                yaw: 0.0,
-                pitch: 0.0,
-                velocity: Vec3::ZERO,
-                grounded: true,
-                flying: false,
-            },
-        )).id();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(start),
+                Player {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    velocity: Vec3::ZERO,
+                    grounded: true,
+                    flying: false,
+                    jump_buffer: 0.0,
+                    coyote_time: 0.0,
+                    step_up_remaining: 0.0,
+                    jump_key_down: false,
+                    flight_key_down: false,
+                },
+            ))
+            .id();
 
         for _ in 0..120 {
             app.update();
@@ -5804,7 +7873,11 @@ mod tests {
             assert!(app.world().get::<Player>(entity).unwrap().grounded);
         }
 
-        app.world_mut().get_mut::<Transform>(entity).unwrap().translation.y += 2.0;
+        app.world_mut()
+            .get_mut::<Transform>(entity)
+            .unwrap()
+            .translation
+            .y += 2.0;
         app.world_mut().get_mut::<Player>(entity).unwrap().grounded = false;
         for _ in 0..240 {
             app.update();
@@ -5813,7 +7886,9 @@ mod tests {
         assert!((landed.y - start.y).abs() < 0.001, "{landed:?}");
         assert!(app.world().get::<Player>(entity).unwrap().grounded);
 
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Space);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
         app.update();
         assert!(app.world().get::<Transform>(entity).unwrap().translation.y > start.y);
     }
@@ -5826,7 +7901,7 @@ mod tests {
         world.chunks.insert(IVec3::ZERO, chunk);
 
         let mut app = App::new();
-        let mut time = Time::<()>::default();
+        let mut time = Time::<Fixed>::default();
         time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         app.insert_resource(time)
             .insert_resource(ButtonInput::<KeyCode>::default())
@@ -5837,23 +7912,39 @@ mod tests {
         window.cursor_options.grab_mode = CursorGrabMode::Locked;
         app.world_mut().spawn((window, PrimaryWindow));
         let start = Vec3::new(0.5, 1.0, 0.5);
-        let entity = app.world_mut().spawn((
-            Transform::from_translation(start),
-            Player {
-                yaw: 0.0,
-                pitch: 0.0,
-                velocity: Vec3::ZERO,
-                grounded: false,
-                flying: true,
-            },
-        )).id();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(start),
+                Player {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    velocity: Vec3::ZERO,
+                    grounded: false,
+                    flying: true,
+                    jump_buffer: 0.0,
+                    coyote_time: 0.0,
+                    step_up_remaining: 0.0,
+                    jump_key_down: false,
+                    flight_key_down: false,
+                },
+            ))
+            .id();
 
         app.update();
-        assert_eq!(app.world().get::<Transform>(entity).unwrap().translation, start);
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyF);
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation,
+            start
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
         app.update();
         let position = app.world().get::<Transform>(entity).unwrap().translation;
-        assert!(!collides_with_world(app.world().resource::<WorldData>(), position));
+        assert!(!collides_with_world(
+            app.world().resource::<WorldData>(),
+            position
+        ));
         assert!((position.y - (1.0 + PLAYER_EYE_HEIGHT)).abs() < 0.001);
     }
 
@@ -5883,7 +7974,7 @@ mod tests {
     #[test]
     fn eating_restores_hunger_and_consumes_food() {
         let mut survival = Survival {
-            hunger: 16.0,  // Changed from 15 to 16, so 16 + 4 = 20 = MAX_HUNGER
+            hunger: 16.0, // Changed from 15 to 16, so 16 + 4 = 20 = MAX_HUNGER
             food: 2,
             ..default()
         };
@@ -5894,7 +7985,7 @@ mod tests {
         assert!(!eat_food(&mut survival));
         survival.hunger = 0.0;
         assert!(eat_food(&mut survival));
-        assert_eq!(survival.hunger, 4.0);  // BerryRation provides 4 saturation, not 6
+        assert_eq!(survival.hunger, 4.0); // BerryRation provides 4 saturation, not 6
     }
 
     #[test]
@@ -5928,116 +8019,60 @@ mod tests {
     }
 
     #[test]
-    fn crafting_recipes_consume_materials_and_create_tools_or_food() {
+    fn equipped_tools_only_help_with_matching_blocks_and_break() {
         let mut inventory = Inventory::default();
-        let mut survival = Survival::default();
-        let mut tools = CraftedTools::default();
-        inventory.counts[WOOD as usize] = 6;
-        inventory.counts[STONE as usize] = 3;
-        inventory.counts[LEAVES as usize] = 3;
-
-        assert!(craft_recipe(
-            CraftRecipe::WoodenPickaxe,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(tools.pickaxe_durability, 64);
-        assert_eq!(inventory.count(WOOD), 3);
-        assert_eq!(inventory.count(STONE), 1);
-        assert_eq!(tool_durability_for_block(STONE, &mut tools), Some(63));
-        assert_eq!(tools.pickaxe_durability, 63);
-
-        assert!(craft_recipe(
-            CraftRecipe::WoodenAxe,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(tools.axe_durability, 64);
-        assert_eq!(tool_durability_for_block(LEAVES, &mut tools), Some(63));
-
-        assert!(craft_recipe(
-            CraftRecipe::BerryRation,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(survival.food, default_starting_food() + 1);
-        assert_eq!(inventory.count(LEAVES), 0);
-    }
-
-    #[test]
-    fn failed_crafting_does_not_consume_materials() {
-        let mut inventory = Inventory::default();
-        let mut survival = Survival::default();
-        let mut tools = CraftedTools::default();
-        inventory.counts[WOOD as usize] = 2;
-        inventory.counts[STONE as usize] = 1;
-
-        assert!(craft_recipe(
-            CraftRecipe::WoodenPickaxe,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_err());
-        assert_eq!(inventory.count(WOOD), 2);
-        assert_eq!(inventory.count(STONE), 1);
-        assert_eq!(tools.pickaxe_durability, 0);
-    }
-
-    #[test]
-    fn tools_only_help_with_matching_blocks_and_break_after_64_uses() {
-        let mut tools = CraftedTools {
-            pickaxe_durability: 1,
-            axe_durability: 2,
-            shovel_durability: 0,
-            sword_durability: 0,
-        };
-
-        assert_eq!(tool_durability_for_block(WOOD, &mut tools), Some(1));
-        assert_eq!(tool_durability_for_block(STONE, &mut tools), Some(0));
-        assert_eq!(tool_durability_for_block(STONE, &mut tools), None);
-        assert_eq!(tool_durability_for_block(LEAVES, &mut tools), Some(0));
-        assert_eq!(tool_durability_for_block(LEAVES, &mut tools), None);
+        inventory
+            .try_add(
+                Item::Tool {
+                    kind: ToolKind::Pickaxe,
+                    durability: 1,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            selected_mining_tool(STONE, inventory.slots[0]),
+            Some(MiningTool::Pickaxe)
+        );
+        assert_eq!(selected_mining_tool(WOOD, inventory.slots[0]), None);
+        assert_eq!(wear_selected_tool(&mut inventory, 0), Some(0));
+        assert_eq!(selected_mining_tool(STONE, inventory.slots[0]), None);
     }
 
     #[test]
     fn shovel_is_twice_as_efficient_on_sand_and_dirt() {
-        let mut tools = CraftedTools {
-            pickaxe_durability: 0,
-            axe_durability: 0,
-            shovel_durability: 10,
-            sword_durability: 0,
-        };
-
-        assert_eq!(tool_durability_for_block(SAND, &mut tools), Some(9));
-        assert_eq!(tool_durability_for_block(DIRT, &mut tools), Some(8));
-        assert_eq!(tools.shovel_durability, 8);
-        assert_eq!(tool_durability_for_block(STONE, &mut tools), None);
+        let shovel = Some(ItemStack {
+            item: Item::Tool {
+                kind: ToolKind::Shovel,
+                durability: 10,
+            },
+            count: 1,
+        });
+        assert_eq!(selected_mining_tool(SAND, shovel), Some(MiningTool::Shovel));
+        assert_eq!(selected_mining_tool(DIRT, shovel), Some(MiningTool::Shovel));
+        assert_eq!(selected_mining_tool(STONE, shovel), None);
+        assert_eq!(
+            mining_duration(DIRT, selected_mining_tool(DIRT, shovel)),
+            mining_duration(DIRT, None) / 2.0
+        );
     }
 
     #[test]
     fn sword_consumes_durability_on_mob_hits() {
-        let mut tools = CraftedTools {
-            pickaxe_durability: 0,
-            axe_durability: 0,
-            shovel_durability: 0,
-            sword_durability: 5,
-        };
-
-        let initial_durability = tools.sword_durability;
-        for _ in 0..5 {
-            if tools.sword_durability > 0 {
-                tools.sword_durability -= 1;
-            }
+        let mut inventory = Inventory::default();
+        inventory
+            .try_add(
+                Item::Tool {
+                    kind: ToolKind::Sword,
+                    durability: 5,
+                },
+                1,
+            )
+            .unwrap();
+        for remaining in (0..5).rev() {
+            assert_eq!(wear_selected_tool(&mut inventory, 0), Some(remaining));
         }
-        assert_eq!(tools.sword_durability, 0);
-        assert_eq!(initial_durability, 5);
+        assert!(inventory.slots[0].is_none());
     }
 
     #[test]
@@ -6071,8 +8106,10 @@ mod tests {
             .insert_resource(PointerState::default())
             .insert_resource(CraftingUi::default())
             .insert_resource(SelectedBlock(GRASS))
+            .insert_resource(SelectedHotbarSlot::default())
             .insert_resource(Inventory::default())
             .insert_resource(CraftedTools::default())
+            .insert_resource(MiningState::default())
             .insert_resource(WorldStorage::default())
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
@@ -6128,10 +8165,18 @@ mod tests {
         let mut world = WorldData { seed, ..default() };
         for z in -6..=6 {
             for x in -6..=6 {
-                let coordinate = IVec3::new(x, 0, z);
-                world
-                    .chunks
-                    .insert(coordinate, generate_chunk(coordinate, seed));
+                let center_y = terrain_height(
+                    x * CHUNK_SIZE + CHUNK_SIZE / 2,
+                    z * CHUNK_SIZE + CHUNK_SIZE / 2,
+                    seed,
+                )
+                .div_euclid(CHUNK_SIZE);
+                for y in (center_y - 1).max(0)..=(center_y + 1).min(WORLD_HEIGHT / CHUNK_SIZE - 1) {
+                    let coordinate = IVec3::new(x, y, z);
+                    world
+                        .chunks
+                        .insert(coordinate, generate_chunk(coordinate, seed));
+                }
             }
         }
 
@@ -6176,9 +8221,9 @@ mod tests {
         world.modified_chunks.insert(IVec3::ZERO, modified_chunk);
         world.chunks.insert(IVec3::new(1, 0, 0), Chunk::new());
         let mut inventory = Inventory::default();
-        inventory.counts[DIRT as usize] = 17;
-        inventory.counts[SAND as usize] = 5;
-        inventory.counts[WOOD as usize] = 3;
+        inventory.try_add(Item::Block(DIRT), 17).unwrap();
+        inventory.try_add(Item::Block(SAND), 5).unwrap();
+        inventory.try_add(Item::Block(WOOD), 3).unwrap();
         let survival = Survival {
             health: 13.5,
             hunger: 8.0,
@@ -6199,6 +8244,11 @@ mod tests {
             velocity: Vec3::ZERO,
             grounded: true,
             flying: false,
+            jump_buffer: 0.0,
+            coyote_time: 0.0,
+            step_up_remaining: 0.0,
+            jump_key_down: false,
+            flight_key_down: false,
         };
         let save = snapshot_world(
             &world,
@@ -6252,6 +8302,7 @@ mod tests {
             version: SAVE_VERSION,
             name: "Prueba".into(),
             seed: 9876,
+            terrain_version: TERRAIN_VERSION,
             time_of_day_seconds: 43_200.0,
             player_position: [4.5, 9.0, -2.0],
             player_yaw: 1.2,
@@ -6259,7 +8310,8 @@ mod tests {
             selected_block: DIRT,
             selected_hotbar_slot: 1,
             inventory: [0, 0, 17, 0],
-            extra_inventory: [0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+            extra_inventory: vec![0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+            slot_inventory: Some(Inventory::default()),
             health: 15.0,
             hunger: 12.0,
             experience: 25,
@@ -6344,6 +8396,7 @@ mod tests {
         let contents = r#"(version:1,name:"Prueba",seed:42,player_position:(0.0,0.0,0.0),selected_block:1,inventory:(0,0,0,0),chunks:[])"#;
         let save: WorldSave = ron::from_str(contents).expect("deserialize existing world save");
 
+        assert_eq!(save.terrain_version, 1);
         assert_eq!(save.player_yaw, 0.0);
         assert_eq!(save.player_pitch, 0.0);
         assert_eq!(save.time_of_day_seconds, DEFAULT_TIME_OF_DAY_SECONDS);
@@ -6354,26 +8407,18 @@ mod tests {
         assert_eq!(save.food, default_starting_food());
         assert_eq!(save.pickaxe_durability, 0);
         assert_eq!(save.axe_durability, 0);
-        validate_world_save(&save).expect("validate existing world save");
+        assert!(validate_world_save(&save).is_err());
     }
 
     #[test]
-    fn hotbar_has_six_slots_and_scroll_wraps_in_both_directions() {
-        assert_eq!(HOTBAR_BLOCKS.len(), 6);
-        assert_eq!(cycle_hotbar_selection(0, -1), 5);
-        assert_eq!(cycle_hotbar_selection(5, 1), 0);
+    fn hotbar_has_nine_slots_and_scroll_wraps_in_both_directions() {
+        assert_eq!(HOTBAR_SLOT_COUNT, 9);
+        assert_eq!(cycle_hotbar_selection(0, -1), 8);
+        assert_eq!(cycle_hotbar_selection(8, 1), 0);
         assert_eq!(cycle_hotbar_selection(2, 3), 5);
-        assert_eq!(resolve_hotbar_slot(DIRT, 0), 1);
-        assert_eq!(resolve_hotbar_slot(SAND, 3), 3);
         assert_eq!(mouse_wheel_steps(1.0, MouseScrollUnit::Line), -1);
         assert_eq!(mouse_wheel_steps(-80.0, MouseScrollUnit::Pixel), 2);
         assert_eq!(mouse_wheel_steps(0.0, MouseScrollUnit::Line), 0);
-
-        let mut selected = SelectedBlock(GRASS);
-        let mut selected_slot = SelectedHotbarSlot::default();
-        set_hotbar_selection(5, &mut selected, &mut selected_slot);
-        assert_eq!(selected_slot.0, 5);
-        assert_eq!(selected.0, LEAVES);
     }
 
     #[test]
@@ -6436,6 +8481,7 @@ mod tests {
             version: SAVE_VERSION + 1,
             name: "Prueba".into(),
             seed: 1,
+            terrain_version: TERRAIN_VERSION,
             time_of_day_seconds: DEFAULT_TIME_OF_DAY_SECONDS,
             player_position: [0.0, 0.0, 0.0],
             player_yaw: 0.0,
@@ -6443,7 +8489,8 @@ mod tests {
             selected_block: GRASS,
             selected_hotbar_slot: 0,
             inventory: [0; LEGACY_BLOCK_COUNT],
-            extra_inventory: [0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+            extra_inventory: vec![0; BLOCK_COUNT - LEGACY_BLOCK_COUNT],
+            slot_inventory: Some(Inventory::default()),
             health: MAX_HEALTH,
             hunger: MAX_HUNGER,
             experience: 0,
@@ -6536,7 +8583,10 @@ mod tests {
 
     #[test]
     fn doors_block_player_collision_when_closed_but_allow_passage_when_open() {
-        let mut world = WorldData { seed: 42, ..default() };
+        let mut world = WorldData {
+            seed: 42,
+            ..default()
+        };
         world
             .chunks
             .insert(IVec3::ZERO, generate_chunk(IVec3::ZERO, 42));
@@ -6564,7 +8614,10 @@ mod tests {
 
     #[test]
     fn stairs_and_slabs_do_not_block_collision_but_render() {
-        let mut world = WorldData { seed: 42, ..default() };
+        let mut world = WorldData {
+            seed: 42,
+            ..default()
+        };
         world
             .chunks
             .insert(IVec3::ZERO, generate_chunk(IVec3::ZERO, 42));
@@ -6578,78 +8631,12 @@ mod tests {
         }
 
         // Stairs and slabs should not be solid (player can walk through them)
-        assert!(
-            !is_block_solid(&world, stair_pos),
-            "Stairs allow movement"
-        );
+        assert!(!is_block_solid(&world, stair_pos), "Stairs allow movement");
         assert!(!is_block_solid(&world, slab_pos), "Slabs allow movement");
 
         // But they render in the world (chunk has the blocks)
         let chunk = world.chunks.get(&IVec3::ZERO).unwrap();
         assert_eq!(chunk.get(stair_pos), STAIRS);
         assert_eq!(chunk.get(slab_pos), SLAB);
-    }
-
-    #[test]
-    fn crafting_structures_creates_expected_quantities() {
-        let mut inventory = Inventory::default();
-        let mut survival = Survival::default();
-        let mut tools = CraftedTools::default();
-        inventory.counts[WOOD as usize] = 24;
-        inventory.counts[STONE as usize] = 16;
-
-        // Craft 3 doors (6 wood each)
-        assert!(craft_recipe(
-            CraftRecipe::WoodenDoor,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(inventory.count(WOODEN_DOOR), 3);
-
-        // Craft 4 stairs (6 wood each)
-        inventory.counts[WOOD as usize] = 24;
-        assert!(craft_recipe(
-            CraftRecipe::Stairs,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(inventory.count(STAIRS), 4);
-
-        // Craft 6 slabs (3 wood each)
-        inventory.counts[WOOD as usize] = 18;
-        assert!(craft_recipe(
-            CraftRecipe::Slab,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(inventory.count(SLAB), 6);
-
-        // Craft 4 bricks (4 stone each)
-        inventory.counts[STONE as usize] = 16;
-        assert!(craft_recipe(
-            CraftRecipe::Bricks,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(inventory.count(BRICKS), 4);
-
-        // Craft 4 planks from 1 wood (efficient conversion)
-        inventory.counts[WOOD as usize] = 1;
-        assert!(craft_recipe(
-            CraftRecipe::Planks,
-            &mut inventory,
-            &mut survival,
-            &mut tools
-        )
-        .is_ok());
-        assert_eq!(inventory.count(PLANKS), 4);
     }
 }

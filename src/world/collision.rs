@@ -38,7 +38,13 @@ pub fn collides_with_world(world: &WorldData, min: Vec3, max: Vec3) -> bool {
     false
 }
 
-pub fn find_ceiling_or_ground(world: &WorldData, x: i32, z: i32, max_y: i32, step: i32) -> Option<i32> {
+pub fn find_ceiling_or_ground(
+    world: &WorldData,
+    x: i32,
+    z: i32,
+    max_y: i32,
+    step: i32,
+) -> Option<i32> {
     (0..=max_y)
         .step_by(step as usize)
         .find(|&y| block_at(world, IVec3::new(x, y, z)) != AIR)
@@ -57,7 +63,7 @@ pub fn light_level_at(world: &WorldData, pos: IVec3) -> f32 {
         let depth_below_surface = terrain_h - pos.y as f32;
         (15.0 - depth_below_surface * 0.3).max(0.5)
     };
-    
+
     // Add torch light contribution
     let mut torch_light: f32 = 0.0;
     let pos_f = pos.as_vec3();
@@ -70,6 +76,6 @@ pub fn light_level_at(world: &WorldData, pos: IVec3) -> f32 {
             torch_light = torch_light.max(contribution);
         }
     }
-    
+
     (base_light + torch_light).clamp(0.0, 15.0)
 }
